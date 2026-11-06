@@ -1,117 +1,86 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Тихая Деревня — вечерняя прогулка</title>
+  <link rel="stylesheet" href="css/village.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/three.module.js",
+      "three/addons/": "./vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
 
-    <title>DRAG AND DROP FILE UPLOAD</title>
+  <div id="loading">
+    <div class="loading-inner">
+      <div class="lamp"></div>
+      <h1>Тихая Деревня</h1>
+      <p id="loading-status">Разжигаем фонари…</p>
+      <div class="bar"><i id="loading-bar"></i></div>
+    </div>
+  </div>
 
-    <!-- Bootstrap core CSS -->
-    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.3/css/bootstrap.min.css">
+  <div id="hud" class="hidden">
+    <div class="panel panel-place" id="place-panel">
+      <div class="place-name" id="place-name">Центральная площадь</div>
+      <div class="place-sub" id="place-sub">Тихо пахнет дымом и яблоками</div>
+    </div>
 
-    <!-- Custom styles -->
-    <link href="css/jquery.uploader.min.css" rel="stylesheet">
-    <link href="css/styles.css" rel="stylesheet">
-  </head>
-
-  <body>
-
-    <main role="main" class="container">
-
-      <h1>DRAG AND DROP FILE UPLOAD - Test task</h1>
-      <p class="lead mb-4">
-There is a need to implement the next features:
-
-<li>container on the page, that accept draggable files</li>
-<li>multi-upload</li>
-<li>the page should not refresh</li>
-<li>by dragging the file on the page the dragging container should change the style to indicate user where is need to drop files</li>
-<li>by leaving page borders</li>
-<li>accept only specified file types: “jpg”, “jpeg”, “png”, “gif”, “pdf”</li>
-<li>for uploaded files show the preview list - small thumbnails</li>
-<li>a solution should be cross-platform and works at the browsers: “chrome”, “safari”, “firefox”, “edge” with the latest updates.</li>
-</br>
-<p style="color:#333;">All functions are implemented. The folder in the project has a folder <strong>backend/files</strong> it contains all the files that were downloaded.</p>
-      </p>
-	  </br>
-<p style="color:#333;">You need to download .zip archive and extract it to the main folder on your server, or add to a folder <strong>htdocs</strong> if you use <strong>Xampp</strong></p>
-      </p>
-      <div class="row">
-        <div class="col-md-6 col-sm-12">
-          
-          <!-- Our markup, the important part here! -->
-          <div id="drag-and-drop-zone" class="dm-uploader p-5">
-            <h3 class="mb-5 mt-5 text-muted">Drag &amp; drop files here</h3>
-
-            <div class="btn btn-primary btn-block mb-5">
-                <span>Open the file Browser</span>
-                <input type="file" title='Click to add Files' />
-            </div>
-          </div><!-- /uploader -->
-
+    <div class="panel panel-top-right">
+      <div class="clock" id="clock">19:40</div>
+      <div class="phase" id="phase">Сумерки</div>
+      <input id="time-slider" type="range" min="0" max="24" step="0.01" value="19.6" aria-label="Время суток">
+      <div class="presets">
+        <button data-time="7.5">Утро</button>
+        <button data-time="13">День</button>
+        <button data-time="19.6" class="active">Сумерки</button>
+        <button data-time="23">Ночь</button>
+      </div>
+      <div class="weather-row">
+        <span class="weather-label">Погода</span>
+        <div class="weather-btns">
+          <button data-weather="clear" class="active" title="Ясно">☀</button>
+          <button data-weather="rain" title="Дождь">☂</button>
+          <button data-weather="fog" title="Туман">≋</button>
         </div>
-        <div class="col-md-6 col-sm-12">
-          <div class="card h-100">
-            <div class="card-header">
-              File List
-            </div>
+      </div>
+    </div>
 
-            <ul class="list-unstyled p-2 d-flex flex-column col" id="files">
-              <li class="text-muted text-center empty">No files uploaded.</li>
-            </ul>
-          </div>
-        </div>
-      </div><!-- /file list -->
-	  
-      <div class="row">
-        <div class="col-12">
-           <div class="card h-100">
-            <div class="card-header">
-              Debug Messages
-            </div>
+    <div class="panel panel-bottom-left">
+      <div class="keys">
+        <span><b>W A S D</b> идти</span>
+        <span><b>Shift</b> бежать</span>
+        <span><b>Мышь</b> осмотреться</span>
+        <span><b>Колесо</b> приблизить</span>
+        <span><b>E</b> поговорить</span>
+        <span><b>F</b> фонарь</span>
+        <span><b>P</b> скрыть интерфейс</span>
+      </div>
+      <div class="toggles">
+        <button id="btn-bloom" class="active">Свечение</button>
+        <button id="btn-shuffle" class="active">Светлячки</button>
+        <button id="btn-sound">Звук</button>
+        <button id="btn-photo">Снимок</button>
+      </div>
+    </div>
 
-            <ul class="list-group list-group-flush" id="debug">
-              <li class="list-group-item text-muted empty">Loading plugin....</li>
-            </ul>
-          </div>
-        </div>
-      </div> <!-- /debug -->
-	  
-    </main> <!-- /container -->
+    <div class="panel panel-bottom-right" id="stat-panel">
+      <div><span id="stat-people">0</span> жителей рядом</div>
+      <div><span id="stat-houses">0</span> домиков в деревне</div>
+    </div>
 
-    <footer class="text-center">
-        <p>&copy; Sergeysan27 &middot; <a href="mailto:infetung27@gmail.com">infetung27@gmail.com</a></p>
-    </footer>
+    <div id="bubble" class="bubble hidden"><p id="bubble-text"></p><span id="bubble-name"></span></div>
+    <div id="toast" class="toast hidden"></div>
 
-    <script src="https://code.jquery.com/jquery-3.2.1.min.js"></script>
-    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.3/js/bootstrap.min.js"></script>
+    <div id="prompt" class="prompt hidden"><b>E</b> <span id="prompt-text">Поговорить</span></div>
+  </div>
 
-    <script src="js/jquery.uploader.min.js"></script>
-    <script src="js/ui.js"></script>
-    <script src="js/config.js"></script>
-
-    <!-- File item template -->
-    <script type="text/html" id="files-template">
-      <li class="media">
-        <div class="media-body mb-1">
-          <p class="mb-2">
-            <strong>%%filename%%</strong> - Status: <span class="text-muted">Waiting</span>
-          </p>
-          <div class="progress mb-2">
-            <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" 
-              role="progressbar"
-              style="width: 0%" 
-              aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
-            </div>
-          </div>
-          <hr class="mt-1 mb-1" />
-        </div>
-      </li>
-    </script>
-
-    <!-- Debug item template -->
-    <script type="text/html" id="debug-template">
-      <li class="list-group-item text-%%color%%"><strong>%%date%%</strong>: %%message%%</li>
-    </script>
-  </body>
+  <script type="module" src="js/village/main.js"></script>
+</body>
 </html>
