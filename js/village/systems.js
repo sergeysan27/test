@@ -97,7 +97,6 @@ export class SkySystem {
     this.sun.shadow.radius = 2.5;
     scene.add(this.sun);
     scene.add(this.sun.target);
-
     // The warm light at night comes from the lantern in the player's hand,
     // which lives in the shared light pool. A second point light here would
     // double the cost of every lit pixel for no visible gain.
@@ -119,13 +118,15 @@ export class SkySystem {
     // sun path
     const ang = ((hours - 6) / 24) * Math.PI * 2;
     const elevation = Math.sin(ang);
-    const dir = new THREE.Vector3(Math.cos(ang) * 0.55, Math.max(elevation, -0.4), Math.sin(ang) * 0.35 + 0.25).normalize();
+    // the scratch vectors are reused so the frame loop allocates nothing
+    const dir = this._dir || (this._dir = new THREE.Vector3());
+    dir.set(Math.cos(ang) * 0.55, Math.max(elevation, -0.4), Math.sin(ang) * 0.35 + 0.25).normalize();
     this.material.uniforms.sunDir.value.copy(dir);
     this.material.uniforms.starAmount.value = clamp(nightAmount * 1.2 - 0.15, 0, 1);
     this.material.uniforms.exponent.value = lerp(0.55, 0.75, dayAmount);
 
     // sun light
-    this.sun.position.copy(playerPos).add(dir.clone().multiplyScalar(70));
+    this.sun.position.copy(playerPos).addScaledVector(dir, 70);
     this.sun.target.position.copy(playerPos);
     this.sun.intensity = lerp(0.25, 2.6, dayAmount) * (elevation > -0.1 ? 1 : 0.25) * (1 - (weather?.rainAmount ?? 0) * 0.55);
     this.sun.color.setHex(st.sun);
@@ -143,9 +144,10 @@ export class SkySystem {
     // fog
     const rainAmount = weather?.rainAmount ?? 0;
     const fogAmount = weather?.fogAmount ?? 0;
-    const fogColor = new THREE.Color(st.fog);
-    if (rainAmount > 0.02) fogColor.lerp(new THREE.Color(0x8fa0b0), rainAmount * 0.5);
-    if (fogAmount > 0.02) fogColor.lerp(new THREE.Color(0xc4d0dc), fogAmount * 0.6);
+    const fogColor = this._fogColor || (this._fogColor = new THREE.Color());
+    fogColor.setHex(st.fog);
+    if (rainAmount > 0.02) fogColor.lerp(this._rainColor || (this._rainColor = new THREE.Color(0x8fa0b0)), rainAmount * 0.5);
+    if (fogAmount > 0.02) fogColor.lerp(this._fogTint || (this._fogTint = new THREE.Color(0xc4d0dc)), fogAmount * 0.6);
     if (!this.scene.fog) this.scene.fog = new THREE.Fog(fogColor, 40, 190);
     this.scene.fog.color.copy(fogColor);
     this.scene.fog.near = lerp(28, 55, dayAmount) * (1 - fogAmount * 0.75) * (1 - rainAmount * 0.35);
@@ -155,7 +157,7 @@ export class SkySystem {
     this.fill.intensity = lerp(0.2, 0.05, nightAmount);
 
     // fill follows the player so night shapes stay readable
-    this.fill.position.copy(playerPos).add(new THREE.Vector3(-30, 26, 20));
+    this.fill.position.set(playerPos.x - 30, playerPos.y + 26, playerPos.z + 20);
     this.fill.target.position.copy(playerPos);
     this.fill.target.updateMatrixWorld();
   }

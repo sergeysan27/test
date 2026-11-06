@@ -1,18 +1,54 @@
 import * as THREE from 'three';
 import { WORLD, PALETTE } from './config.js';
-import { makeRng, valueNoise2D, fbm, clamp } from './util.js';
+import { makeRng, valueNoise2D, fbm, clamp, lerp } from './util.js';
 import { grassTexture } from './textures.js';
 
 // ---------- Terrain ----------
 // The village sits in a gentle bowl: flat around the plaza, rolling hills at the rim.
-export function terrainHeight(x, z) {
+//
+// The height is asked for every character on every frame, and the noise it
+// is built from is expensive, so the result is cached on a fine grid and
+// interpolated. The grid is much finer than the ground mesh, so the height
+// a character stands on matches the ground they are standing on.
+const HEIGHT_STEP = 0.25;   // metres between grid points
+const HEIGHT_CACHE = new Map();
+
+function heightAt(gx, gz) {
+  const key = gx * 100000 + gz;
+  let h = HEIGHT_CACHE.get(key);
+  if (h !== undefined) return h;
+
   const noise = valueNoise2D(WORLD.seed);
+  const x = gx * HEIGHT_STEP;
+  const z = gz * HEIGHT_STEP;
   const r = Math.hypot(x, z);
   const rolling = (fbm(noise, x * 0.011, z * 0.011, 4) - 0.5) * 4.2;
   const detail = (fbm(noise, x * 0.05, z * 0.05, 2) - 0.5) * 0.7;
   const edgeLift = Math.max(0, (r - 34) / 46) * 3.2;
   const flat = 1 - Math.min(1, Math.max(0, (r - 12) / 16));
-  return (rolling + detail) * (1 - flat * 0.85) + edgeLift;
+  h = (rolling + detail) * (1 - flat * 0.85) + edgeLift;
+
+  // The cache is bounded: the player can walk over the whole map, so it
+  // would otherwise grow without limit.
+  if (HEIGHT_CACHE.size > 120000) HEIGHT_CACHE.clear();
+  HEIGHT_CACHE.set(key, h);
+  return h;
+}
+
+// The exact height of the terrain, sampled from the cached grid with a
+// bilinear blend so the surface is smooth between the grid points.
+export function terrainHeight(x, z) {
+  const fx = x / HEIGHT_STEP;
+  const fz = z / HEIGHT_STEP;
+  const x0 = Math.floor(fx);
+  const z0 = Math.floor(fz);
+  const tx = fx - x0;
+  const tz = fz - z0;
+  const h00 = heightAt(x0, z0);
+  const h10 = heightAt(x0 + 1, z0);
+  const h01 = heightAt(x0, z0 + 1);
+  const h11 = heightAt(x0 + 1, z0 + 1);
+  return lerp(lerp(h00, h10, tx), lerp(h01, h11, tx), tz);
 }
 
 export function buildGround(rng) {

@@ -185,7 +185,10 @@ export function buildHouse(spec, cache) {
   }
 
   // windows — the positions mirror the openings cut into the walls
-  const winMat = cache.getWindow().clone();
+  // All the windows of the village share one material: a material per
+  // window would mean a separate shader program for each of them, and the
+  // emissive glow is driven from one place anyway.
+  const winMat = cache.getWindow();
   const winFrames = [];
   const positions = [];
 
@@ -218,13 +221,13 @@ export function buildHouse(spec, cache) {
       part.position.x += Math.sin(p.rot) * 0.02;
       part.position.z += Math.cos(p.rot) * 0.02;
     }
-    // glass sits in the middle of the opening
+    // glass sits in the middle of the opening. All the windows share one
+    // material, so they can be merged into a single mesh of the village.
     const pane = new THREE.Mesh(planeGeo, winMat);
     pane.scale.set(winW, winH, 1);
     pane.position.set(p.x, p.y, p.z);
     pane.rotation.y = p.rot;
-    pane.userData.dynamic = true;
-    shell.add(pane);
+    group.add(pane);
     winFrames.push({ pane, side: p.side });
     // mullions
     const bar = addBox(shell, trimMat, 0.05, winH, 0.06, p.x, p.y, p.z, p.rot);

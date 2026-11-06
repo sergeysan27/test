@@ -331,9 +331,13 @@ export function mergeVillage(groups, { keepDynamic = true } = {}) {
       if (Array.isArray(o.material)) return;
       if (o.userData.dynamic) return;
       const m = o.material;
-      if (m.transparent || m.opacity < 1) return;
-      if (m.emissive && m.emissive.getHex() !== 0) return;
-      if (m.metalness > 0.15) return;
+      // A little metalness is fine: the merged surface loses the shine, but
+      // for a lamp post or a window frame nobody notices, and every mesh
+      // that stays separate is a draw call in every frame.
+      if (m.metalness > 0.5) return;
+      // Transparent surfaces are merged as well, but they keep their own
+      // material so they are still drawn after the opaque ones.
+      const transparent = m.transparent || m.opacity < 1;
 
       let g = o.geometry.clone();
       world.copy(o.matrixWorld);
@@ -342,6 +346,31 @@ export function mergeVillage(groups, { keepDynamic = true } = {}) {
       if (m.map) {
         // a texture carries detail a vertex colour cannot: keep the
         // material and merge with the others that share it
+        g = prepareForMerge(g);
+        const key = m.uuid;
+        if (!textured.has(key)) {
+          textured.set(key, { material: m, geos: [], castShadow: false, receiveShadow: false });
+        }
+        const b = textured.get(key);
+        b.geos.push(g);
+        b.castShadow = b.castShadow || o.castShadow;
+        b.receiveShadow = b.receiveShadow || o.receiveShadow;
+      } else if (m.emissive && m.emissive.getHex() !== 0) {
+        // glowing surfaces are merged with the others that share the same
+        // material, so the whole village has a handful of window meshes
+        // instead of one per house
+        g = prepareForMerge(g);
+        const key = m.uuid;
+        if (!textured.has(key)) {
+          textured.set(key, { material: m, geos: [], castShadow: false, receiveShadow: false });
+        }
+        const b = textured.get(key);
+        b.geos.push(g);
+        b.castShadow = b.castShadow || o.castShadow;
+        b.receiveShadow = b.receiveShadow || o.receiveShadow;
+      } else if (transparent) {
+        // glass and other see-through bits: merged, but with the original
+        // material so they keep their transparency
         g = prepareForMerge(g);
         const key = m.uuid;
         if (!textured.has(key)) {
@@ -400,6 +429,8 @@ export function mergeVillage(groups, { keepDynamic = true } = {}) {
     mesh.castShadow = b.castShadow;
     mesh.receiveShadow = b.receiveShadow;
     mesh.matrixAutoUpdate = false;
+    // the see-through parts are drawn after the solid ones
+    if (b.material.transparent) mesh.renderOrder = 2;
     out.add(mesh);
   }
   return out;

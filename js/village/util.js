@@ -38,13 +38,22 @@ export function smoothstep(edge0, edge1, x) {
   return t * t * (3 - 2 * t);
 }
 
+// The noise table is 65536 floats. Building it takes a few milliseconds, so
+// it is built once per seed and reused: the terrain height is asked for
+// every character on every frame, and rebuilding the table each time was
+// the single most expensive thing in the game loop.
+const noiseTables = new Map();
+
 export function valueNoise2D(seed) {
+  let noise = noiseTables.get(seed);
+  if (noise) return noise;
+
   const rand = mulberry32(seed);
   const size = 256;
   const table = new Float32Array(size * size);
   for (let i = 0; i < table.length; i++) table[i] = rand();
   const at = (x, y) => table[(((y % size) + size) % size) * size + (((x % size) + size) % size)];
-  return (x, y) => {
+  noise = (x, y) => {
     const xi = Math.floor(x);
     const yi = Math.floor(y);
     const xf = x - xi;
@@ -57,6 +66,8 @@ export function valueNoise2D(seed) {
     const d = at(xi + 1, yi + 1);
     return lerp(lerp(a, b, u), lerp(c, d, u), v);
   };
+  noiseTables.set(seed, noise);
+  return noise;
 }
 
 export function fbm(noise, x, y, octaves = 4, lacunarity = 2, gain = 0.5) {

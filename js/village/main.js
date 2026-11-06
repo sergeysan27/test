@@ -18,6 +18,7 @@ import { glowSprite } from './textures.js';
 import { createContactShadow } from './shadows.js';
 import { updateSmoke } from './smoke.js';
 import { mergeAll, mergeToVertexColors, mergeChildrenToVertexColors, mergeVillage } from './merge.js';
+import { createFxaaPass } from './fxaa.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Ambience } from './audio.js';
 import { LightPool } from './lights.js';
@@ -250,14 +251,32 @@ class Village {
   }
 
   setupRenderer() {
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance' });
+    // Antialiasing is the single most expensive thing in a WebGL frame:
+    // it multiplies the fill rate of every draw call. The village is drawn
+    // with a post-processing pass anyway, so the smoothing is done there
+    // instead and the geometry stays cheap.
+    this.renderer = new THREE.WebGLRenderer({
+      canvas: this.canvas,
+      antialias: false,
+      powerPreference: 'high-performance',
+      stencil: false,
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // PCFSoftShadowMap filters every shadow pixel several times over.
+    // PCFShadowMap looks nearly the same here and is far cheaper.
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    // The shadow map does not have to be redrawn every frame: the sun moves
+    // slowly and the village is static. It is refreshed a few times a
+    // second instead of sixty.
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
+    this._shadowTimer = 0;
 
     this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 600);
     this.camera.position.set(0, 2.4, 14);
@@ -400,7 +419,11 @@ class Village {
     // Collapse the whole static village into a handful of meshes. The
     // textured surfaces keep their own material, everything plain is merged
     // into one mesh with the colour baked into the vertices.
-    scene.add(mergeVillage(this.staticGroups));
+    const merged = mergeVillage(this.staticGroups);
+    // The merged village is one big shape, so it only needs one shadow
+    // map entry instead of one per house.
+    merged.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    scene.add(merged);
 
     // the bonfire and garlands feed the shared light pool
     scene.updateMatrixWorld(true);
@@ -594,26 +617,31 @@ class Village {
   setupComposer() {
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    // Bloom is the most expensive effect in the frame: it runs several
-    // full-screen passes. Rendering it at half resolution cuts the fill cost
-    // by four and the difference in a soft glow is barely visible.
-    const bloomRes = new THREE.Vector2(
-      Math.max(1, Math.floor(window.innerWidth / 2)),
-      Math.max(1, Math.floor(window.innerHeight / 2))
+    // Bloom is by far the most expensive effect in the frame: it runs a
+    // dozen full-screen passes. The composer hands it the full resolution
+    // every time the window is resized, so the size is clamped here.
+    const bloom = new UnrealBloomPass(
+      new THREE.Vector2(
+        Math.max(1, Math.floor(window.innerWidth / 2)),
+        Math.max(1, Math.floor(window.innerHeight / 2))
+      ),
+      0.42, 0.62, 0.85
     );
-    const bloom = new UnrealBloomPass(bloomRes, 0.42, 0.62, 0.85);
+    // keep the glow at half resolution: it is blurred anyway, and the
+    // difference is invisible
+    const realSetSize = bloom.setSize.bind(bloom);
+    bloom.setSize = (w, h) => {
+      realSetSize(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    };
     composer.addPass(bloom);
+    // The edges are smoothed after the bloom, in one cheap pass.
+    this.fxaa = createFxaaPass(window.innerWidth, window.innerHeight, this.renderer.getPixelRatio());
+    composer.addPass(this.fxaa);
     composer.addPass(new OutputPass());
     composer.setSize(window.innerWidth, window.innerHeight);
     this.composer = composer;
     this.bloom = bloom;
     this.setBloom(true);
-    // keep the glow at half resolution - it is the single most expensive
-    // effect in the frame and a soft blur hides the difference
-    bloom.setSize(
-      Math.max(1, Math.floor(window.innerWidth / 2)),
-      Math.max(1, Math.floor(window.innerHeight / 2))
-    );
   }
 
   setBloom(on) {
@@ -972,7 +1000,11 @@ class Village {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.composer?.setSize(window.innerWidth, window.innerHeight);
-    this.bloom?.setSize(window.innerWidth, window.innerHeight);
+    const r = this.renderer.getPixelRatio();
+    this.fxaa?.material.uniforms.resolution.value.set(
+      1 / Math.max(1, window.innerWidth * r),
+      1 / Math.max(1, window.innerHeight * r)
+    );
   }
 
   updatePlayer(dt) {
@@ -1005,29 +1037,30 @@ class Village {
       const rz = -Math.sin(yaw);
       const wx = rx * mx + fx * mz;
       const wz = rz * mx + fz * mz;
-      const target = new THREE.Vector3(wx, 0, wz).multiplyScalar(speed);
-      p.vel.x = damp(p.vel.x, target.x, 9, dt);
-      p.vel.z = damp(p.vel.z, target.z, 9, dt);
+      p.vel.x = damp(p.vel.x, wx * speed, 9, dt);
+      p.vel.z = damp(p.vel.z, wz * speed, 9, dt);
     } else {
       p.vel.x = damp(p.vel.x, 0, 11, dt);
       p.vel.z = damp(p.vel.z, 0, 11, dt);
     }
 
-    const next = p.pos.clone().add(p.vel.clone().multiplyScalar(dt));
+    // no allocations in the frame loop
+    let nextX = p.pos.x + p.vel.x * dt;
+    let nextZ = p.pos.z + p.vel.z * dt;
     // world bounds
-    const r = Math.hypot(next.x, next.z);
+    const r = Math.hypot(nextX, nextZ);
     if (r > WORLD.groundRadius - 3) {
-      next.x = (next.x / r) * (WORLD.groundRadius - 3);
-      next.z = (next.z / r) * (WORLD.groundRadius - 3);
+      nextX = (nextX / r) * (WORLD.groundRadius - 3);
+      nextZ = (nextZ / r) * (WORLD.groundRadius - 3);
     }
     // solid buildings: the player cannot walk through walls
     if (this.collision) {
-      const fixed = this.collision.resolve(next.x, next.z, 0.4);
-      next.x = fixed.x;
-      next.z = fixed.z;
+      const fixed = this.collision.resolve(nextX, nextZ, 0.4);
+      nextX = fixed.x;
+      nextZ = fixed.z;
     }
-    p.pos.x = next.x;
-    p.pos.z = next.z;
+    p.pos.x = nextX;
+    p.pos.z = nextZ;
     p.pos.y = terrainHeight(p.pos.x, p.pos.z);
 
     // animation
@@ -1065,26 +1098,32 @@ class Village {
   updateCamera(dt) {
     const p = this.player;
     const dist = this.cameraDist ?? 6.5;
-    const focus = new THREE.Vector3(p.pos.x, p.pos.y + 1.5, p.pos.z);
-    const offset = new THREE.Vector3(
+    // the scratch vectors are reused so the frame loop allocates nothing
+    const focus = this._camFocus || (this._camFocus = new THREE.Vector3());
+    const offset = this._camOffset || (this._camOffset = new THREE.Vector3());
+    const desired = this._camDesired || (this._camDesired = new THREE.Vector3());
+    const camTarget = this._camTarget || (this._camTarget = new THREE.Vector3());
+    focus.set(p.pos.x, p.pos.y + 1.5, p.pos.z);
+    offset.set(
       Math.sin(p.yaw) * dist * Math.cos(p.pitch),
       0.9 - Math.sin(p.pitch) * dist * 0.6 + dist * 0.28,
       Math.cos(p.yaw) * dist * Math.cos(p.pitch)
     );
-    const desired = focus.clone().add(offset);
+    desired.copy(focus).add(offset);
     desired.y = Math.max(desired.y, terrainHeight(desired.x, desired.z) + 1.0);
 
     // Keep the camera outside buildings: when a wall is in the way the boom
     // slides sideways around the obstacle instead of snapping into the back
     // of the character.
-    let camTarget = desired;
     if (this.collision) {
       const clamped = this.collision.resolveCameraBoom(
         focus.x, focus.y, focus.z,
         desired.x, desired.y, desired.z,
         0.4
       );
-      camTarget = new THREE.Vector3(clamped.x, clamped.y, clamped.z);
+      camTarget.set(clamped.x, clamped.y, clamped.z);
+    } else {
+      camTarget.copy(desired);
     }
     this.camera.position.lerp(camTarget, 1 - Math.exp(-14 * dt));
     this.camera.lookAt(focus);
@@ -1173,14 +1212,11 @@ class Village {
       ud.pool.material.opacity = damp(ud.pool.material.opacity, night * 0.26, 5, dt);
       ud.glassMat.emissiveIntensity = damp(ud.glassMat.emissiveIntensity, 0.2 + night * 2.6, 5, dt);
     }
-    // window glow
-    for (const h of this.houses) {
-      const ud = h.userData;
-      const spec = ud.spec;
-      const lit = spec.lit ? night : 0;
-      for (const w of ud.windows) {
-        w.pane.material.emissiveIntensity = 0.25 + lit * 3.4;
-      }
+    // window glow. All the windows of the village share one material, so
+    // the glow is set once and every window follows.
+    const anyLit = this.houses.some((h) => h.userData.spec.lit);
+    if (this.cache.getWindow) {
+      this.cache.getWindow().emissiveIntensity = 0.25 + (anyLit ? night : 0) * 3.4;
     }
     for (const h of this.houseLights) {
       const lit = h.spec.lit ? night : 0;
@@ -1214,20 +1250,21 @@ class Village {
     }
     this._fpsFrames++;
     const elapsed = (now - this._fpsSince) / 1000;
-    if (elapsed < 2) return;
+    if (elapsed < 1) return;
     const fps = this._fpsFrames / elapsed;
     this._fpsSince = now;
     this._fpsFrames = 0;
     this.measuredFps = fps;
+
     // The cheapest thing to give up is resolution, so try that first.
     this.adaptResolution(fps);
     // Shadows and bloom only go when the machine is really struggling:
     // dropping them changes the look of the village a lot.
-    if (fps < 12 && this.quality > 0) {
+    if (fps < 24 && this.quality > 0) {
       this.quality--;
       this._qualityLocked = true;
       this.applyQuality();
-    } else if (fps > 50 && this.quality < 2 && !this._qualityLocked) {
+    } else if (fps > 55 && this.quality < 2 && !this._qualityLocked) {
       this.quality++;
       this.applyQuality();
     }
@@ -1269,6 +1306,9 @@ class Village {
     document.getElementById('btn-bloom')?.classList.toggle('active', this.settings.bloom);
     this.renderer.shadowMap.enabled = q >= 1;
     if (this.sky?.sun) this.sky.sun.castShadow = q >= 1;
+    // the shadow map is refreshed on a timer, not every frame
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
     this.setPixelRatio(q >= 2 ? Math.min(window.devicePixelRatio, 1.75) : 1);
     if (this.composer) this.composer.setSize(window.innerWidth, window.innerHeight);
     this.onToast?.(q >= 2 ? 'Качество: высокое' : q === 1 ? 'Качество: среднее' : 'Качество: низкое');
@@ -1284,12 +1324,10 @@ class Village {
     if (this.composer) {
       this.composer.setPixelRatio?.(r);
       this.composer.setSize(window.innerWidth, window.innerHeight);
-      // setSize() resets the bloom pass to full resolution, which is by far
-      // the most expensive thing in the frame. Keep it at half: the glow is
-      // blurred anyway and the difference is invisible.
-      this.bloom?.setSize(
-        Math.max(1, Math.floor(window.innerWidth / 2)),
-        Math.max(1, Math.floor(window.innerHeight / 2))
+      // the smoothing pass works on the pixels that are actually drawn
+      this.fxaa?.material.uniforms.resolution.value.set(
+        1 / Math.max(1, window.innerWidth * r),
+        1 / Math.max(1, window.innerHeight * r)
       );
     }
   }
@@ -1300,9 +1338,11 @@ class Village {
     if (this._qualityLocked) return;
     const cur = this._pixelRatio ?? 1;
     const max = this.quality >= 2 ? Math.min(window.devicePixelRatio, 1.75) : 1;
-    if (fps < 24 && cur > 0.5) {
+    if (fps < 40 && cur > 0.5) {
+      // the village is fill-rate bound, so the resolution is the first
+      // thing to give
       this.setPixelRatio(Math.max(0.5, cur - 0.15));
-    } else if (fps > 50 && cur < max) {
+    } else if (fps > 55 && cur < max) {
       this.setPixelRatio(Math.min(max, cur + 0.1));
     }
   }
@@ -1331,6 +1371,13 @@ class Village {
     if (fadeEl) fadeEl.style.opacity = this.sleepSeq.fade;
 
     this.updatePlayer(dt);
+    // The shadow map is refreshed a few times a second, and always when the
+    // sun has moved noticeably or the player has walked.
+    this._shadowTimer += dt;
+    if (this._shadowTimer > 0.2) {
+      this._shadowTimer = 0;
+      this.renderer.shadowMap.needsUpdate = true;
+    }
     // The world runs on its own clock, independent of the frame rate.
     this.worldBridge.playerPos = this.player.pos;
     this.worldBridge.update(dt, this.hours);
@@ -1342,7 +1389,8 @@ class Village {
     this.updateLamps(dt, this.time);
     this.updatePlayerLantern(dt);
     this.adaptQuality(dt);
-    this.sky.update(this.hours, this.player.pos, this.camera.getWorldDirection(new THREE.Vector3()), this.weather);
+    this.camera.getWorldDirection(this._camDir || (this._camDir = new THREE.Vector3()));
+    this.sky.update(this.hours, this.player.pos, this._camDir, this.weather);
     this.fireflies.update(dt, this.hours);
     this.weather.update(dt, this.player.pos, this.hours);
     updateBirds(this.birds, dt, this.time, this.hours, this.player.pos);
