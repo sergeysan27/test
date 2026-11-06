@@ -1,5 +1,20 @@
 import * as THREE from 'three';
 
+// Every generated texture is a 128-512 pixel canvas that lives in GPU
+// memory for the whole session. A village with sixteen houses would
+// otherwise end up with hundreds of identical-looking textures, so the
+// results are cached by their parameters.
+const textureCache = new Map();
+
+function cached(key, factory) {
+  let tex = textureCache.get(key);
+  if (!tex) {
+    tex = factory();
+    textureCache.set(key, tex);
+  }
+  return tex;
+}
+
 function canvas(size) {
   const c = document.createElement('canvas');
   c.width = c.height = size;
@@ -16,6 +31,7 @@ function toTexture(c, repeat = 1) {
 }
 
 export function grassTexture(base = '#4f7a3c', repeat = 40) {
+  return cached(`grass(${base},${repeat})`, () => {
   const size = 512;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -45,9 +61,11 @@ export function grassTexture(base = '#4f7a3c', repeat = 40) {
     g.fillRect(x - r, y - r, r * 2, r * 2);
   }
   return toTexture(c, repeat);
+  });
 }
 
 export function pathTexture() {
+  return cached('path', () => {
   const size = 512;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -64,9 +82,11 @@ export function pathTexture() {
     g.fill();
   }
   return toTexture(c, 1);
+  });
 }
 
 export function plasterTexture(base = '#d9c9a8') {
+  return cached(`plaster(${base})`, () => {
   const size = 256;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -89,9 +109,11 @@ export function plasterTexture(base = '#d9c9a8') {
     g.fillRect(x - r, y - r, r * 2, r * 2);
   }
   return toTexture(c, 1);
+  });
 }
 
 export function roofTexture(base = '#9c4a3c') {
+  return cached(`roof(${base})`, () => {
   const size = 256;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -119,9 +141,11 @@ export function roofTexture(base = '#9c4a3c') {
     g.fillRect(x, y, 1, 1);
   }
   return toTexture(c, 1);
+  });
 }
 
 export function woodTexture(base = '#6b4f36') {
+  return cached(`wood(${base})`, () => {
   const size = 256;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -139,9 +163,11 @@ export function woodTexture(base = '#6b4f36') {
     g.stroke();
   }
   return toTexture(c, 1);
+  });
 }
 
 export function leafTexture(base = '#3f6b35') {
+  return cached(`leaf(${base})`, () => {
   const size = 256;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -157,9 +183,11 @@ export function leafTexture(base = '#3f6b35') {
     g.fill();
   }
   return toTexture(c, 1);
+  });
 }
 
 export function glowSprite(color = '#ffd9a0', softness = 0.55) {
+  return cached(`glow(${color},${softness})`, () => {
   const size = 128;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -172,9 +200,11 @@ export function glowSprite(color = '#ffd9a0', softness = 0.55) {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+  });
 }
 
 export function starTexture() {
+  return cached('star', () => {
   const size = 64;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -187,9 +217,11 @@ export function starTexture() {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+  });
 }
 
 export function windowTexture() {
+  return cached('window', () => {
   const size = 128;
   const c = canvas(size);
   const g = c.getContext('2d');
@@ -205,7 +237,7 @@ export function windowTexture() {
   g.lineWidth = 7;
   g.beginPath();
   g.moveTo(size / 2, 8);
-  g.lineTo(size / 2, size - 8);
+  g.lineTo(size / 2, size - 16);
   g.moveTo(8, size / 2);
   g.lineTo(size - 8, size / 2);
   g.stroke();
@@ -213,4 +245,5 @@ export function windowTexture() {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+  });
 }

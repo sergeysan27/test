@@ -80,25 +80,27 @@ export class SkySystem {
 
     this.sun = new THREE.DirectionalLight(0xffd9a0, 1.0);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(1536, 1536);
+    // 1024 is enough for a soft village shadow and four times cheaper than
+    // 2048 in fill rate
+    this.sun.shadow.mapSize.set(1024, 1024);
     const cam = this.sun.shadow.camera;
     cam.near = 1;
-    cam.far = 160;
-    cam.left = -48;
-    cam.right = 48;
-    cam.top = 48;
-    cam.bottom = -48;
+    cam.far = 120;
+    // a tighter frustum around the player means far better shadow
+    // resolution for the same map size
+    cam.left = -32;
+    cam.right = 32;
+    cam.top = 32;
+    cam.bottom = -32;
     this.sun.shadow.bias = -0.0012;
     this.sun.shadow.normalBias = 0.045;
+    this.sun.shadow.radius = 2.5;
     scene.add(this.sun);
     scene.add(this.sun.target);
 
-    // player lamp (warm light travelling with the camera)
-    this.playerLight = new THREE.PointLight(0xffbe78, 0, 14, 2);
-    this.playerLight.position.y = 3.4;
-    scene.add(this.playerLight);
-
-    // directional fill: keeps night readable without killing the mood
+    // The warm light at night comes from the lantern in the player's hand,
+    // which lives in the shared light pool. A second point light here would
+    // double the cost of every lit pixel for no visible gain.
     this.fill = new THREE.DirectionalLight(0x8fa8d8, 0.2);
     this.fill.position.set(-40, 30, 25);
     scene.add(this.fill);
@@ -149,10 +151,8 @@ export class SkySystem {
     this.scene.fog.near = lerp(28, 55, dayAmount) * (1 - fogAmount * 0.75) * (1 - rainAmount * 0.35);
     this.scene.fog.far = lerp(150, 230, dayAmount) * (1 - fogAmount * 0.55) * (1 - rainAmount * 0.3);
 
-    // player warm light at night
-    this.playerLight.position.copy(playerPos).add(new THREE.Vector3(0, 3.4, 0));
-    this.playerLight.intensity = lerp(0.3, 2.4, nightAmount);
-    this.playerLight.distance = lerp(12, 22, nightAmount);
+    // directional fill: keeps night readable without killing the mood
+    this.fill.intensity = lerp(0.2, 0.05, nightAmount);
 
     // fill follows the player so night shapes stay readable
     this.fill.position.copy(playerPos).add(new THREE.Vector3(-30, 26, 20));
@@ -185,7 +185,7 @@ export class WeatherSystem {
     // fog banks
     this.fogBanks = new THREE.Group();
     const fogTex = makeFogTexture();
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < 8; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({
         map: fogTex, transparent: true, opacity: 0.0, depthWrite: false,
         depthTest: true, color: 0xc8d4e0, sizeAttenuation: true,
@@ -193,7 +193,8 @@ export class WeatherSystem {
       const a = Math.random() * Math.PI * 2;
       const r = 30 + Math.random() * 60;
       s.position.set(Math.cos(a) * r, 1.2 + Math.random() * 2.4, Math.sin(a) * r);
-      s.scale.set(26, 8, 1);
+      s.scale.set(20, 6, 1);
+      s.visible = false;
       this.fogBanks.add(s);
     }
     scene.add(this.fogBanks);
@@ -227,7 +228,11 @@ export class WeatherSystem {
     }
     const nightish = 1 - smoothstep(5.5, 8.5, hours) * (1 - smoothstep(17.5, 20, hours));
     for (const s of this.fogBanks.children) {
-      s.material.opacity = this.fogAmount * 0.22 * (0.4 + nightish * 0.6);
+      const opacity = this.fogAmount * 0.22 * (0.4 + nightish * 0.6);
+      s.material.opacity = opacity;
+      // an invisible bank is pure overhead
+      s.visible = opacity > 0.015;
+      if (!s.visible) continue;
       s.position.x += dt * 0.35;
       // keep the banks far away so they never sit right in front of the camera
       const dx = s.position.x - playerPos.x;

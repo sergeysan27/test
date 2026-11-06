@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 
 // A soft column of chimney smoke: stacked sprites that rise, drift and fade.
-export function buildSmoke(x, y, z, count = 7) {
+// The puffs are few on purpose - every sprite is a draw call, and a
+// village full of chimneys adds up quickly.
+export function buildSmoke(x, y, z, count = 4) {
   const group = new THREE.Group();
   const puffs = [];
   const tex = makePuffTexture();
@@ -15,6 +17,7 @@ export function buildSmoke(x, y, z, count = 7) {
     }));
     s.position.set(x, y, z);
     s.scale.setScalar(0.6 + i * 0.22);
+    s.visible = false;
     group.add(s);
     puffs.push({ sprite: s, offset: i / count, drift: (Math.random() - 0.5) * 0.9 });
   }
@@ -25,14 +28,22 @@ export function buildSmoke(x, y, z, count = 7) {
 export function updateSmoke(group, dt, time, intensity = 1) {
   const puffs = group.userData?.puffs;
   if (!puffs) return;
+  // when the chimney is cold there is nothing to draw
+  const on = intensity > 0.06;
   for (const p of puffs) {
     const t = (time * 0.22 + p.offset) % 1;
     const s = p.sprite;
+    if (!on) {
+      s.visible = false;
+      continue;
+    }
     s.position.y += dt * (0.55 + t * 1.2);
     s.position.x += dt * (0.28 + p.drift * 0.4);
     s.position.z += dt * 0.12;
     const fade = Math.sin(t * Math.PI);
     s.material.opacity = fade * 0.24 * intensity;
+    // a fully faded puff is not worth a draw call
+    s.visible = s.material.opacity > 0.012;
     s.scale.setScalar((0.5 + t * 2.4) * (0.9 + p.offset * 0.3));
     if (t < 0.05) {
       s.position.y = s.userData.baseY ?? (s.userData.baseY = s.position.y);

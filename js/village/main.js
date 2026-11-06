@@ -16,7 +16,7 @@ import { pathTexture } from './textures.js';
 import { glowSprite } from './textures.js';
 import { createContactShadow } from './shadows.js';
 import { updateSmoke } from './smoke.js';
-import { mergeAll } from './merge.js';
+import { mergeAll, mergeToVertexColors, mergeChildrenToVertexColors, mergeVillage } from './merge.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Ambience } from './audio.js';
 import { LightPool } from './lights.js';
@@ -172,9 +172,9 @@ class Player {
     const base = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.065, 0.03, 8), metal);
     base.position.y = -0.09;
     lantern.add(base);
-    const llight = new THREE.PointLight(0xffb060, 3.0, 9, 2);
-    llight.position.y = -0.02;
-    lantern.add(llight);
+    // The lantern does not carry its own point light: it is fed from the
+    // shared pool, so the number of lights in the shader stays fixed no
+    // matter how many lamps the village has.
     const lglow = new THREE.Sprite(new THREE.SpriteMaterial({
       map: glowSprite('#ffcf8a'), color: 0xffb060, transparent: true, opacity: 0.7,
       blending: THREE.AdditiveBlending, depthWrite: false,
@@ -184,11 +184,27 @@ class Player {
     lantern.position.set(0.34, 0.86, 0.16);
     body.add(lantern);
     this.lantern = lantern;
-    this.lanternLight = llight;
     this.lanternGlow = lglow;
     this.lanternGlass = glass;
+    // the emitter for the shared light pool
+    this.lanternEmitter = {
+      position: new THREE.Vector3(),
+      color: 0xffb060,
+      intensity: 0,
+      distance: 9,
+    };
 
     this.body.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    // The player is on screen every single frame, so it is worth collapsing
+    // the many small pieces into one mesh with baked vertex colours.
+    mergeChildrenToVertexColors(this.head);
+    mergeChildrenToVertexColors(this.legL);
+    mergeChildrenToVertexColors(this.legR);
+    mergeChildrenToVertexColors(this.armL);
+    mergeChildrenToVertexColors(this.armR);
+    mergeToVertexColors(body, {
+      keepSubtrees: [this.legL, this.legR, this.armL, this.armR, this.head, lantern],
+    });
     scene.add(this.body);
 
     this.shadow = createContactShadow(0.62, 0.5);
@@ -257,7 +273,7 @@ class Village {
     this.houseLights = [];
     this.interiorEmitters = [];
     this.staticGroups = [];
-    this.lightPool = new LightPool(scene, 12);
+    this.lightPool = new LightPool(scene, 6);
     for (const spec of this.layout.houses) {
       const h = buildHouse(spec, this.cache);
       h.position.set(spec.x, terrainHeight(spec.x, spec.z), spec.z);
@@ -370,9 +386,10 @@ class Village {
       this.staticGroups.push(p);
     }
 
-    // Collapse the whole static village into one mesh per material.
-    // Animated pieces (flames, garland lanterns, smoke) stay untouched.
-    scene.add(mergeAll(this.staticGroups));
+    // Collapse the whole static village into a handful of meshes. The
+    // textured surfaces keep their own material, everything plain is merged
+    // into one mesh with the colour baked into the vertices.
+    scene.add(mergeVillage(this.staticGroups));
 
     // the bonfire and garlands feed the shared light pool
     scene.updateMatrixWorld(true);
@@ -422,6 +439,9 @@ class Village {
     this.player.pos.set(2, 0, 9);
     this.player.yaw = Math.PI;
     this.player.body.position.copy(this.player.pos);
+    // The lantern in the player's hand is fed from the same pool as the
+    // village lamps, so the number of lights in the shader stays fixed.
+    this.lightPool.add(this.player.lanternEmitter);
 
     // the ginger cat lives on the bench near the plaza
     this.cat = new Cat(scene, { x: -11, z: 6.4 }, terrainHeight);
@@ -563,16 +583,26 @@ class Village {
   setupComposer() {
     const composer = new EffectComposer(this.renderer);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.42, 0.62, 0.85
+    // Bloom is the most expensive effect in the frame: it runs several
+    // full-screen passes. Rendering it at half resolution cuts the fill cost
+    // by four and the difference in a soft glow is barely visible.
+    const bloomRes = new THREE.Vector2(
+      Math.max(1, Math.floor(window.innerWidth / 2)),
+      Math.max(1, Math.floor(window.innerHeight / 2))
     );
+    const bloom = new UnrealBloomPass(bloomRes, 0.42, 0.62, 0.85);
     composer.addPass(bloom);
     composer.addPass(new OutputPass());
     composer.setSize(window.innerWidth, window.innerHeight);
     this.composer = composer;
     this.bloom = bloom;
     this.setBloom(true);
+    // keep the glow at half resolution - it is the single most expensive
+    // effect in the frame and a soft blur hides the difference
+    bloom.setSize(
+      Math.max(1, Math.floor(window.innerWidth / 2)),
+      Math.max(1, Math.floor(window.innerHeight / 2))
+    );
   }
 
   setBloom(on) {
@@ -634,6 +664,7 @@ class Village {
     canvas.addEventListener('touchend', () => { touchStart = null; }, { passive: true });
 
     document.getElementById('btn-bloom')?.addEventListener('click', () => this.setBloom(!this.settings.bloom));
+    document.getElementById('btn-quality')?.addEventListener('click', () => this.cycleQuality());
     document.getElementById('btn-shuffle')?.addEventListener('click', () => {
       this.settings.fireflies = !this.settings.fireflies;
       this.fireflies.enabled = this.settings.fireflies;
@@ -1030,11 +1061,16 @@ class Village {
     const night = clamp(1 - (smoothstepLocal(5.4, 8.0, this.hours) * (1 - smoothstepLocal(17.6, 20.2, this.hours))), 0, 1);
     const on = this.playerLampOn === undefined ? true : this.playerLampOn;
     const target = on ? night : 0;
-    const cur = p.lanternLight.intensity;
-    const next = damp(cur, target * 2.1, 4, dt);
-    p.lanternLight.intensity = next;
-    p.lanternGlass.material.emissiveIntensity = 0.3 + (next / 2.1) * 1.6;
-    p.lanternGlow.material.opacity = (next / 2.1) * 0.5;
+    const e = p.lanternEmitter;
+    const cur = e.intensity;
+    const next = damp(cur, target * 2.4, 4, dt);
+    e.intensity = next;
+    // the emitter follows the lantern in world space
+    p.lantern.getWorldPosition(e.position);
+    e.position.y += 0.1;
+    p.lanternGlass.material.emissiveIntensity = 0.3 + (next / 2.4) * 1.6;
+    p.lanternGlow.material.opacity = (next / 2.4) * 0.5;
+    p.lanternGlow.visible = p.lanternGlow.material.opacity > 0.015;
     // gentle sway
     p.lantern.rotation.z = Math.sin(this.time * 2.4) * 0.09;
     p.lantern.rotation.x = Math.sin(this.time * 1.9 + 1) * 0.06;
@@ -1105,26 +1141,74 @@ class Village {
     for (const e of this.interiorEmitters) {
       e.emitter.intensity = damp(e.emitter.intensity, e.lit ? night * 2.4 : 0, 4, dt);
     }
+    // A sprite with zero opacity still costs a draw call and, for the big
+    // fog banks, a lot of fill rate. Hide them completely when they are off.
+    for (const g of this.garlands ?? []) {
+      for (const l of g.lanterns) {
+        l.glow.visible = l.glow.material.opacity > 0.015;
+      }
+    }
     this.lightPool.update(this.camera.position);
   }
 
   // Adaptive quality: if the device cannot keep up, step down the effects
   // instead of dropping the frame rate.
   adaptQuality(dt) {
-    this._fpsAccum += dt;
+    // The frame delta is clamped for the simulation, so it cannot be used to
+    // measure the frame rate: a machine running at 5 fps would report 20.
+    // Real time is the only honest source here.
+    const now = performance.now();
+    if (this._fpsSince === undefined) {
+      this._fpsSince = now;
+      this._fpsFrames = 0;
+      return;
+    }
     this._fpsFrames++;
-    if (this._fpsAccum < 2) return;
-    const fps = this._fpsFrames / this._fpsAccum;
-    this._fpsAccum = 0;
+    const elapsed = (now - this._fpsSince) / 1000;
+    if (elapsed < 2) return;
+    const fps = this._fpsFrames / elapsed;
+    this._fpsSince = now;
     this._fpsFrames = 0;
     this.measuredFps = fps;
-    if (fps < 24 && this.quality > 0) {
+    // The cheapest thing to give up is resolution, so try that first.
+    this.adaptResolution(fps);
+    // Shadows and bloom only go when the machine is really struggling:
+    // dropping them changes the look of the village a lot.
+    if (fps < 12 && this.quality > 0) {
       this.quality--;
       this._qualityLocked = true;
       this.applyQuality();
-    } else if (fps > 52 && this.quality < 2 && !this._qualityLocked) {
+    } else if (fps > 50 && this.quality < 2 && !this._qualityLocked) {
       this.quality++;
       this.applyQuality();
+    }
+  }
+
+  setQuality(level) {
+    // 0 = low, 1 = medium, 2 = high
+    this.quality = level;
+    this._qualityLocked = true;
+    this.applyQuality();
+  }
+
+  cycleQuality() {
+    // auto -> high -> medium -> low -> auto
+    const order = ['auto', 2, 1, 0];
+    const btn = document.getElementById('btn-quality');
+    const label = { auto: 'авто', 2: 'высокое', 1: 'среднее', 0: 'низкое' };
+    if (this._qualityMode === undefined) this._qualityMode = 'auto';
+    const next = order[(order.indexOf(this._qualityMode) + 1) % order.length];
+    this._qualityMode = next;
+    if (next === 'auto') {
+      this._qualityLocked = false;
+      this.quality = 2;
+      this.applyQuality();
+    } else {
+      this.setQuality(next);
+    }
+    if (btn) {
+      btn.textContent = `Качество: ${label[next]}`;
+      btn.classList.toggle('active', next === 'auto');
     }
   }
 
@@ -1136,9 +1220,42 @@ class Village {
     document.getElementById('btn-bloom')?.classList.toggle('active', this.settings.bloom);
     this.renderer.shadowMap.enabled = q >= 1;
     if (this.sky?.sun) this.sky.sun.castShadow = q >= 1;
-    this.renderer.setPixelRatio(q >= 2 ? Math.min(window.devicePixelRatio, 2) : 1);
+    this.setPixelRatio(q >= 2 ? Math.min(window.devicePixelRatio, 1.75) : 1);
     if (this.composer) this.composer.setSize(window.innerWidth, window.innerHeight);
     this.onToast?.(q >= 2 ? 'Качество: высокое' : q === 1 ? 'Качество: среднее' : 'Качество: низкое');
+  }
+
+  // The renderer resolution is the single biggest lever on frame rate: the
+  // village is fill-rate bound, not geometry bound. Rendering at a lower
+  // resolution and letting the browser scale the image up is far cheaper
+  // than dropping geometry.
+  setPixelRatio(r) {
+    this._pixelRatio = r;
+    this.renderer.setPixelRatio(r);
+    if (this.composer) {
+      this.composer.setPixelRatio?.(r);
+      this.composer.setSize(window.innerWidth, window.innerHeight);
+      // setSize() resets the bloom pass to full resolution, which is by far
+      // the most expensive thing in the frame. Keep it at half: the glow is
+      // blurred anyway and the difference is invisible.
+      this.bloom?.setSize(
+        Math.max(1, Math.floor(window.innerWidth / 2)),
+        Math.max(1, Math.floor(window.innerHeight / 2))
+      );
+    }
+  }
+
+  // Drops the render resolution when the frame rate is too low and restores
+  // it when there is headroom. Runs on top of the quality levels.
+  adaptResolution(fps) {
+    if (this._qualityLocked) return;
+    const cur = this._pixelRatio ?? 1;
+    const max = this.quality >= 2 ? Math.min(window.devicePixelRatio, 1.75) : 1;
+    if (fps < 24 && cur > 0.5) {
+      this.setPixelRatio(Math.max(0.5, cur - 0.15));
+    } else if (fps > 50 && cur < max) {
+      this.setPixelRatio(Math.min(max, cur + 0.1));
+    }
   }
 
   animate = () => {
@@ -1265,6 +1382,8 @@ class Village {
     }
     const h = document.getElementById('stat-houses');
     if (h) h.textContent = this.layout.houses.length;
+    const fpsEl = document.getElementById('stat-fps');
+    if (fpsEl) fpsEl.textContent = Math.round(this.measuredFps ?? 0);
   }
 
   // ---- HUD for the life simulation ----

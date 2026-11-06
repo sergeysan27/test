@@ -5,7 +5,7 @@ import { buildSmoke } from './smoke.js';
 import { buildRoof, buildInterior } from './interior.js';
 import { buildWallWithHoles } from './walls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { mergeStaticGroup } from './merge.js';
+import { mergeStaticGroup, mergeToVertexColors, mergeChildrenToVertexColors } from './merge.js';
 
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const planeGeo = new THREE.PlaneGeometry(1, 1);
@@ -1034,9 +1034,21 @@ export function buildCharacter(spec) {
   group.userData.parts = { body, legL, legR, armL, armR, head, height: h };
   group.userData.spec = spec;
 
-  // Collapse the static body parts so every villager costs only a handful of
-  // draw calls. Limbs and the head stay separate because they animate.
-  mergeStaticGroup(body, { keepSubtrees: [legL, legR, armL, armR, head] });
+  // Collapse the whole character into a handful of meshes with the colours
+  // baked into the vertices. The limbs and the head stay separate because
+  // they animate, but each of them collapses to a single mesh: a villager
+  // costs five draw calls instead of twenty-two.
+  mergeChildrenToVertexColors(head);
+  mergeChildrenToVertexColors(legL);
+  mergeChildrenToVertexColors(legR);
+  mergeChildrenToVertexColors(armL);
+  mergeChildrenToVertexColors(armR);
+  mergeToVertexColors(group, { keepSubtrees: [legL, legR, armL, armR, head] });
+
+  // Small details on the face never need to cast a shadow: the merged
+  // body casts one anyway, and every extra shadow caster costs a draw call
+  // in the shadow pass.
+  head.traverse((o) => { if (o.isMesh) o.castShadow = false; });
 
   return group;
 }
