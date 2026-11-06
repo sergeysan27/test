@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { PALETTE } from './config.js';
 import { plasterTexture, roofTexture, woodTexture, leafTexture, windowTexture, glowSprite, starTexture } from './textures.js';
 import { buildSmoke } from './smoke.js';
+import { buildRoof, buildInterior } from './interior.js';
+import { buildWallWithHoles } from './walls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { mergeStaticGroup } from './merge.js';
 
@@ -41,7 +43,6 @@ function addBox(parent, matl, w, h, d, x, y, z, rotY = 0) {
   return m;
 }
 
-// ---------------- House ----------------
 export function buildHouse(spec, cache) {
   const group = new THREE.Group();
   const { w, d, h, roofH } = spec;
@@ -51,64 +52,69 @@ export function buildHouse(spec, cache) {
   const trimMat = cache.getWood(spec.trim);
   const doorMat = mat(spec.doorColor, { roughness: 0.7 });
 
-  addBox(group, wallMat, w, h, d, 0, h / 2, 0);
+  // ---- wall layout ----------------------------------------------------
+  // The four walls are built separately with real openings for the door
+  // and the windows, so the room is genuinely visible from outside.
+  const dw = 0.95, dh = 1.9;
+  const winW = 0.86, winH = 0.98;
+  const winY = h * 0.56;
+
+  // front wall (along X, at +Z): door in the middle, windows beside it
+  const frontHoles = [{ x: 0, y: dh / 2, w: dw, h: dh }];
+  const sideSlots = [-0.32, 0.32];
+  for (const slot of sideSlots) {
+    const x = slot * w;
+    if (Math.abs(x) < dw * 0.75) continue;
+    frontHoles.push({ x, y: winY, w: winW, h: winH });
+  }
+  const front = buildWallWithHoles(w, h, 0.18, frontHoles, wallMat);
+  front.position.set(0, 0, d / 2);
+  group.add(front);
+
+  // back wall: one or two windows
+  const backHoles = [];
+  const backCount = w > 6 ? 2 : 1;
+  for (let i = 0; i < backCount; i++) {
+    const t = backCount === 1 ? 0.5 : (i + 1) / (backCount + 1);
+    backHoles.push({ x: (t - 0.5) * w * 0.8, y: winY, w: winW, h: winH });
+  }
+  const back = buildWallWithHoles(w, h, 0.18, backHoles, wallMat);
+  back.position.set(0, 0, -d / 2);
+  group.add(back);
+
+  // side walls (along Z): one window each
+  const sideHoles = [{ x: 0, y: winY, w: winW, h: winH }];
+  for (const s of [-1, 1]) {
+    const side = buildWallWithHoles(d, h, 0.18, sideHoles, wallMat);
+    side.position.set(s * w / 2, 0, 0);
+    side.rotation.y = Math.PI / 2;
+    group.add(side);
+  }
+
   // stone base
   addBox(group, cache.getStone(), w + 0.18, 0.45, d + 0.18, 0, 0.22, 0);
 
-  // gable roof (prism)
-  const roofGeo = new THREE.BufferGeometry();
-  const hw = w / 2 + 0.45;
-  const hd = d / 2 + 0.45;
-  const v = [
-    -hw, 0, -hd, hw, 0, -hd, 0, roofH, -hd,
-    -hw, 0, hd, hw, 0, hd, 0, roofH, hd,
-  ];
-  const idx = [
-    0, 1, 2, 3, 5, 4, // front/back
-    0, 3, 4, 0, 4, 1, // left slope
-    1, 4, 5, 1, 5, 2, // right slope
-    2, 5, 3, 2, 3, 0, // bottom
-  ];
-  roofGeo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
-  roofGeo.setIndex(idx);
-  roofGeo.computeVertexNormals();
-  // UVs for roof texture
-  const uv = [];
-  const pos = roofGeo.attributes.position;
-  for (let i = 0; i < pos.count; i++) uv.push(pos.getX(i) * 0.35, pos.getZ(i) * 0.35 + pos.getY(i) * 0.35);
-  roofGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-  const roof = new THREE.Mesh(roofGeo, roofMat);
-  roof.position.y = h;
-  roof.castShadow = true;
-  roof.receiveShadow = true;
-  group.add(roof);
+  // solid roof with a closed attic void (no peeking inside)
+  const roofGroup = buildRoof(spec, roofMat, wallMat);
+  group.add(roofGroup);
 
-  // gable end triangles (fill)
-  const gableMat = wallMat;
-  for (const s of [-1, 1]) {
-    const gGeo = new THREE.BufferGeometry();
-    gGeo.setAttribute('position', new THREE.Float32BufferAttribute([
-      -hw, 0, 0, hw, 0, 0, 0, roofH, 0,
-    ], 3));
-    gGeo.setIndex(s > 0 ? [0, 1, 2] : [2, 1, 0]);
-    gGeo.computeVertexNormals();
-    const g = new THREE.Mesh(gGeo, gableMat);
-    g.position.set(0, h, s * hd);
-    g.castShadow = true;
-    group.add(g);
-  }
+  // interior furnishings
+  const interior = buildInterior(spec, cache);
+  interior.isInterior = true;
+  group.add(interior);
 
-  // door
-  const dw = 0.95, dh = 1.9;
-  const door = addBox(group, doorMat, dw, dh, 0.12, 0, dh / 2, d / 2 + 0.03);
+  // door leaf, swung open against the wall
+  const door = addBox(group, doorMat, dw, dh, 0.09, 0, dh / 2, d / 2 + 0.06);
   door.castShadow = false;
+  door.rotation.y = -0.85;
+  door.position.set(-dw / 2 + 0.1, dh / 2, d / 2 + 0.12);
   // door frame
-  addBox(group, trimMat, dw + 0.18, 0.12, 0.16, 0, dh + 0.02, d / 2 + 0.02);
-  addBox(group, trimMat, 0.1, dh, 0.16, -dw / 2 - 0.04, dh / 2, d / 2 + 0.02);
-  addBox(group, trimMat, 0.1, dh, 0.16, dw / 2 + 0.04, dh / 2, d / 2 + 0.02);
+  addBox(group, trimMat, dw + 0.22, 0.14, 0.2, 0, dh + 0.05, d / 2 + 0.02);
+  addBox(group, trimMat, 0.12, dh + 0.05, 0.2, -dw / 2 - 0.06, (dh + 0.05) / 2, d / 2 + 0.02);
+  addBox(group, trimMat, 0.12, dh + 0.05, 0.2, dw / 2 + 0.06, (dh + 0.05) / 2, d / 2 + 0.02);
   // handle
   const knob = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), mat(0xc9a44a, { metalness: 0.7, roughness: 0.3 }));
-  knob.position.set(dw * 0.3, dh * 0.5, d / 2 + 0.12);
+  knob.position.set(-dw / 2 + 0.24, dh * 0.5, d / 2 + 0.2);
   group.add(knob);
 
   // porch
@@ -121,56 +127,75 @@ export function buildHouse(spec, cache) {
     awning.rotation.x = -0.16;
   }
 
-  // windows
+  // windows — the positions mirror the openings cut into the walls
   const winMat = cache.getWindow().clone();
   const winFrames = [];
   const positions = [];
-  const winCount = spec.windows;
-  for (let i = 0; i < winCount; i++) {
-    const side = i % 2 === 0 ? 1 : -1;
-    const alongX = i < 2;
-    const t = (Math.floor(i / 2) + 1) / (Math.ceil(winCount / 2) + 1);
-    if (alongX) {
-      positions.push({ x: (t - 0.5) * w * 0.9, y: h * 0.55, z: side * (d / 2 + 0.02), rot: 0, side });
-    } else {
-      positions.push({ x: side * (w / 2 + 0.02), y: h * 0.55, z: (t - 0.5) * d * 0.85, rot: Math.PI / 2, side });
-    }
+
+  // front windows (next to the door)
+  for (const slot of sideSlots) {
+    const x = slot * w;
+    if (Math.abs(x) < dw * 0.75) continue;
+    positions.push({ x, y: winY, z: d / 2, rot: 0, side: 1 });
   }
+  // back windows
+  for (let i = 0; i < backCount; i++) {
+    const t = backCount === 1 ? 0.5 : (i + 1) / (backCount + 1);
+    positions.push({ x: (t - 0.5) * w * 0.8, y: winY, z: -d / 2, rot: Math.PI, side: -1 });
+  }
+  // side windows
+  for (const s of [-1, 1]) {
+    positions.push({ x: s * w / 2, y: winY, z: 0, rot: s * Math.PI / 2, side: s });
+  }
+
   for (const p of positions) {
-    const frame = addBox(group, trimMat, 1.0, 1.15, 0.1, p.x, p.y, p.z, p.rot);
+    // the frame is a ring around the opening, not a solid board over it
+    const frameParts = [
+      [winW + 0.16, 0.09, 0, winH / 2 + 0.045],   // top
+      [winW + 0.16, 0.09, 0, -winH / 2 - 0.045],  // bottom
+      [0.09, winH, -winW / 2 - 0.045, 0],        // left
+      [0.09, winH, winW / 2 + 0.045, 0],         // right
+    ];
+    for (const [fw, fh, fx, fy] of frameParts) {
+      const part = addBox(group, trimMat, fw, fh, 0.12, p.x + fx, p.y + fy, p.z, p.rot);
+      part.position.x += Math.sin(p.rot) * 0.02;
+      part.position.z += Math.cos(p.rot) * 0.02;
+    }
+    // glass sits in the middle of the opening
     const pane = new THREE.Mesh(planeGeo, winMat);
-    pane.scale.set(0.82, 0.95, 1);
+    pane.scale.set(winW, winH, 1);
     pane.position.set(p.x, p.y, p.z);
     pane.rotation.y = p.rot;
     pane.userData.dynamic = true;
-    const off = 0.07;
-    pane.position.x += Math.sin(p.rot) * off;
-    pane.position.z += Math.cos(p.rot) * off;
     group.add(pane);
     winFrames.push({ pane, side: p.side });
-    // shutters
-    if (rngBool(spec.index + positions.indexOf(p))) {
+    // mullions
+    const bar = addBox(group, trimMat, 0.05, winH, 0.06, p.x, p.y, p.z, p.rot);
+    bar.position.x += Math.sin(p.rot) * 0.03;
+    bar.position.z += Math.cos(p.rot) * 0.03;
+    // shutters, folded open against the wall next to the window
+    if (rngBool(spec.index * 3 + positions.indexOf(p) * 7)) {
       const sh = mat(PALETTE.wood[0], { roughness: 0.8 });
       for (const s of [-1, 1]) {
-        const shutter = addBox(group, sh, 0.38, 1.15, 0.06,
-          p.x + (p.rot === 0 ? s * 0.68 : 0), p.y,
-          p.z + (p.rot === 0 ? 0 : s * 0.68), p.rot);
-        shutter.position.x += Math.sin(p.rot) * 0.03;
-        shutter.position.z += Math.cos(p.rot) * 0.03;
+        const shutter = addBox(group, sh, 0.3, winH + 0.08, 0.05,
+          p.x + (p.rot === 0 ? s * (winW / 2 + 0.2) : 0), p.y,
+          p.z + (p.rot === 0 ? 0 : s * (winW / 2 + 0.2)), p.rot);
+        shutter.position.x += Math.sin(p.rot) * 0.09;
+        shutter.position.z += Math.cos(p.rot) * 0.09;
       }
     }
     // flower box
     if (spec.flowerBox && rngBool(spec.index * 7 + 3)) {
-      const box = addBox(group, cache.getWood(spec.trim), 0.95, 0.22, 0.26, p.x, p.y - 0.72, p.z, p.rot);
-      box.position.x += Math.sin(p.rot) * 0.14;
-      box.position.z += Math.cos(p.rot) * 0.14;
+      const box = addBox(group, cache.getWood(spec.trim), winW + 0.1, 0.2, 0.24, p.x, p.y - winH / 2 - 0.14, p.z, p.rot);
+      box.position.x += Math.sin(p.rot) * 0.16;
+      box.position.z += Math.cos(p.rot) * 0.16;
       for (let f = 0; f < 5; f++) {
-        const fl = new THREE.Mesh(new THREE.SphereGeometry(0.075, 6, 5), mat(rngColor([0xd94f6a, 0xe8a13c, 0xc457d6, 0xf0e07a])));
-        const t2 = (f / 4 - 0.5) * 0.8;
+        const fl = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 5), mat(rngColor([0xd94f6a, 0xe8a13c, 0xc457d6, 0xf0e07a])));
+        const t2 = (f / 4 - 0.5) * (winW * 0.8);
         fl.position.set(
-          p.x + Math.sin(p.rot) * 0.14 + (p.rot === 0 ? t2 : 0),
-          p.y - 0.55 + Math.random() * 0.12,
-          p.z + Math.cos(p.rot) * 0.14 + (p.rot === 0 ? 0 : t2)
+          p.x + Math.sin(p.rot) * 0.16 + (p.rot === 0 ? t2 : 0),
+          p.y - winH / 2 - 0.02 + Math.random() * 0.1,
+          p.z + Math.cos(p.rot) * 0.16 + (p.rot === 0 ? 0 : t2)
         );
         group.add(fl);
       }
@@ -587,7 +612,7 @@ function buildGarland(cache, group) {
       new THREE.MeshStandardMaterial({
         color: lanternColors[i % lanternColors.length],
         emissive: lanternColors[i % lanternColors.length],
-        emissiveIntensity: 0.2,
+        emissiveIntensity: 0.12,
         roughness: 0.6,
       })
     );
@@ -596,10 +621,12 @@ function buildGarland(cache, group) {
     l.userData.dynamic = true;
     group.add(l);
     const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: glowSprite('#ffcf8a'), color: lanternColors[i % lanternColors.length],
+      map: glowSprite('#ffcf8a', 0.3), color: lanternColors[i % lanternColors.length],
       transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false,
+      depthTest: true, toneMapped: false,
     }));
-    glow.scale.set(0.32, 0.32, 1);
+    // keep the halo small: a lantern is a tiny paper ball, not a lamppost
+    glow.scale.set(0.11, 0.11, 1);
     glow.position.copy(l.position);
     group.add(glow);
     lanterns.push({ mesh: l, glow, phase: Math.random() * 6 });
@@ -873,15 +900,26 @@ export function buildCharacter(spec) {
     body.add(g);
   }
 
-  // torso
-  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.26 * scale, 0.22 * scale, 0.62 * scale, 10), shirt);
-  torso.position.y = 1.05 * scale;
+  // torso: a slightly tapered trunk that reaches up to the shoulders
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.235 * scale, 0.245 * scale, 0.68 * scale, 12), shirt);
+  torso.position.y = 1.04 * scale;
   torso.castShadow = true;
   body.add(torso);
+  // shoulders widen the silhouette
+  const shoulders = new THREE.Mesh(new THREE.SphereGeometry(0.24 * scale, 12, 8), shirt);
+  shoulders.position.y = 1.36 * scale;
+  shoulders.scale.set(1.25, 0.62, 0.92);
+  shoulders.castShadow = true;
+  body.add(shoulders);
   // hips
-  const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.22 * scale, 0.21 * scale, 0.2 * scale, 10), pants);
-  hips.position.y = 0.7 * scale;
+  const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.225 * scale, 0.215 * scale, 0.22 * scale, 12), pants);
+  hips.position.y = 0.72 * scale;
   body.add(hips);
+  // neck: fills the gap between the shoulders and the head
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.085 * scale, 0.1 * scale, 0.18 * scale, 10), skin);
+  neck.position.y = 1.44 * scale;
+  neck.castShadow = true;
+  body.add(neck);
 
   // arms
   const armL = new THREE.Group();
@@ -1008,6 +1046,91 @@ function mouthMat(smile) {
   return new THREE.MeshStandardMaterial({ color: smile ? 0x8a4a4a : 0x7a5a4a, roughness: 0.6 });
 }
 
+// A standalone cat model with named parts so it can be animated.
+export function buildCatModel(spec = {}) {
+  const group = new THREE.Group();
+  const fur = mat(spec.catColor ?? 0xc07a3a, { roughness: 0.95 });
+  const cream = mat(0xf0e2cc, { roughness: 0.95 });
+
+  const body = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.32, 4, 10), fur);
+  trunk.rotation.x = Math.PI / 2;
+  trunk.position.y = 0.28;
+  trunk.castShadow = true;
+  body.add(trunk);
+  // chest and belly patches
+  const chest = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), cream);
+  chest.position.set(0, 0.26, 0.15);
+  chest.scale.set(0.8, 0.9, 0.7);
+  body.add(chest);
+
+  const head = new THREE.Group();
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.145, 12, 10), fur);
+  skull.castShadow = true;
+  head.add(skull);
+  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), cream);
+  muzzle.position.set(0, -0.03, 0.11);
+  muzzle.scale.set(1, 0.8, 1);
+  head.add(muzzle);
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.022, 6, 5), mat(0xd07a7a));
+  nose.position.set(0, -0.005, 0.175);
+  head.add(nose);
+  for (const s of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.13, 4), fur);
+    ear.position.set(s * 0.085, 0.11, -0.01);
+    ear.rotation.y = Math.PI / 4;
+    head.add(ear);
+    const inner = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.08, 4), cream);
+    inner.position.set(s * 0.085, 0.105, 0.015);
+    inner.rotation.y = Math.PI / 4;
+    head.add(inner);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 6), new THREE.MeshBasicMaterial({ color: 0xd8e85a }));
+    eye.position.set(s * 0.06, 0.02, 0.115);
+    head.add(eye);
+    const pupil = new THREE.Mesh(new THREE.PlaneGeometry(0.014, 0.045), new THREE.MeshBasicMaterial({ color: 0x1a1a12 }));
+    pupil.position.set(s * 0.06, 0.02, 0.145);
+    head.add(pupil);
+  }
+  head.position.set(0, 0.42, 0.24);
+  body.add(head);
+
+  // legs
+  const legs = [];
+  for (const s of [-1, 1]) {
+    for (const f of [-1, 1]) {
+      const leg = new THREE.Group();
+      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.032, 0.26, 6), fur);
+      upper.position.y = -0.13;
+      upper.castShadow = true;
+      leg.add(upper);
+      const paw = new THREE.Mesh(new THREE.SphereGeometry(0.04, 6, 5), cream);
+      paw.position.y = -0.26;
+      paw.scale.set(1, 0.7, 1.2);
+      leg.add(paw);
+      leg.position.set(s * 0.085, 0.26, f * 0.14);
+      body.add(leg);
+      legs.push(leg);
+    }
+  }
+
+  // tail
+  const tail = new THREE.Group();
+  const tailMesh = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.032, 6, 14, Math.PI * 1.35), fur);
+  tailMesh.position.z = -0.12;
+  tailMesh.castShadow = true;
+  tail.add(tailMesh);
+  tail.position.set(0, 0.34, -0.2);
+  tail.rotation.x = 0.5;
+  body.add(tail);
+
+  group.add(body);
+  group.userData.parts = { body, head, legs, tail };
+  group.userData.body = body;
+  group.userData.bodyBaseY = body.position.y;
+  group.scale.setScalar(spec.petScale ?? 1);
+  return group;
+}
+
 function buildCat(spec, group) {
   const cat = new THREE.Group();
   const fur = mat(spec.catColor ?? 0x3a3a42, { roughness: 0.95 });
@@ -1110,15 +1233,43 @@ export function buildFireflies(count) {
     homes.push({ x, y, z, phase: phases[i], speed: 0.4 + Math.random() * 0.8, radius: 0.6 + Math.random() * 1.6 });
   }
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 0.24,
-    map: starTexture(),
+  // A custom shader instead of PointsMaterial: the point size is clamped so
+  // a firefly that flies close to the camera cannot become a huge white
+  // blob that washes out the screen.
+  const mat = new THREE.ShaderMaterial({
     transparent: true,
-    opacity: 0.9,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    color: 0xffe89a,
-    sizeAttenuation: true,
+    uniforms: {
+      map: { value: starTexture() },
+      opacity: { value: 0.9 },
+      pixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
+    },
+    vertexShader: `
+      uniform float pixelRatio;
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float dist = max(-mv.z, 0.001);
+        // clamp so nearby points stay small and far points stay visible
+        float size = clamp(26.0 / dist, 1.5, 9.0) * pixelRatio;
+        gl_PointSize = size;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D map;
+      uniform float opacity;
+      varying vec2 vUv;
+      void main() {
+        vec4 tex = texture2D(map, gl_PointCoord);
+        if (tex.a < 0.05) discard;
+        gl_FragColor = vec4(tex.rgb, tex.a * opacity);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
   });
   const points = new THREE.Points(geo, mat);
   points.frustumCulled = false;
@@ -1131,21 +1282,24 @@ export function createMaterialCache() {
   const walls = new Map();
   const roofs = new Map();
   const woods = new Map();
+  // The tint is baked into the texture, so the material colour stays white.
+  // Otherwise the colour multiplies the already tinted map and everything
+  // comes out far too dark.
   const cache = {
     getWall(color) {
-      if (!walls.has(color)) walls.set(color, mat(color, { map: plasterTexture('#' + color.toString(16).padStart(6, '0')), roughness: 0.92 }));
+      if (!walls.has(color)) walls.set(color, mat(0xffffff, { map: plasterTexture('#' + color.toString(16).padStart(6, '0')), roughness: 0.92 }));
       return walls.get(color);
     },
     getRoof(color) {
-      if (!roofs.has(color)) roofs.set(color, mat(color, { map: roofTexture('#' + color.toString(16).padStart(6, '0')), roughness: 0.9 }));
+      if (!roofs.has(color)) roofs.set(color, mat(0xffffff, { map: roofTexture('#' + color.toString(16).padStart(6, '0')), roughness: 0.9 }));
       return roofs.get(color);
     },
     getWood(color) {
-      if (!woods.has(color)) woods.set(color, mat(color, { map: woodTexture('#' + color.toString(16).padStart(6, '0')), roughness: 0.85 }));
+      if (!woods.has(color)) woods.set(color, mat(0xffffff, { map: woodTexture('#' + color.toString(16).padStart(6, '0')), roughness: 0.85 }));
       return woods.get(color);
     },
     getStone() {
-      if (!cache._stone) cache._stone = mat(0x8d8578, { map: plasterTexture('#8d8578'), roughness: 0.95 });
+      if (!cache._stone) cache._stone = mat(0xffffff, { map: plasterTexture('#8d8578'), roughness: 0.95 });
       return cache._stone;
     },
     getLeaf() {
@@ -1153,17 +1307,18 @@ export function createMaterialCache() {
       return cache._leaf;
     },
     getTrunk() {
-      if (!cache._trunk) cache._trunk = mat(0x5a4331, { map: woodTexture('#5a4331'), roughness: 0.95 });
+      if (!cache._trunk) cache._trunk = mat(0xffffff, { map: woodTexture('#5a4331'), roughness: 0.95 });
       return cache._trunk;
     },
     getWindow() {
       if (!cache._window) cache._window = new THREE.MeshStandardMaterial({
         map: windowTexture(),
         emissiveMap: windowTexture(),
-        emissive: 0xffffff,
-        emissiveIntensity: 0.15,
+        emissive: 0xffd9a0,
+        emissiveIntensity: 0.9,
         roughness: 0.4,
         metalness: 0,
+        side: THREE.DoubleSide,
       });
       return cache._window;
     },

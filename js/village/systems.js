@@ -95,6 +95,7 @@ export class SkySystem {
 
     // player lamp (warm light travelling with the camera)
     this.playerLight = new THREE.PointLight(0xffbe78, 0, 14, 2);
+    this.playerLight.position.y = 3.4;
     scene.add(this.playerLight);
 
     // directional fill: keeps night readable without killing the mood
@@ -149,9 +150,9 @@ export class SkySystem {
     this.scene.fog.far = lerp(150, 230, dayAmount) * (1 - fogAmount * 0.55) * (1 - rainAmount * 0.3);
 
     // player warm light at night
-    this.playerLight.position.copy(playerPos).add(new THREE.Vector3(0, 2.4, 0));
-    this.playerLight.intensity = lerp(0.6, 5.5, nightAmount);
-    this.playerLight.distance = lerp(14, 26, nightAmount);
+    this.playerLight.position.copy(playerPos).add(new THREE.Vector3(0, 3.4, 0));
+    this.playerLight.intensity = lerp(0.3, 2.4, nightAmount);
+    this.playerLight.distance = lerp(12, 22, nightAmount);
 
     // fill follows the player so night shapes stay readable
     this.fill.position.copy(playerPos).add(new THREE.Vector3(-30, 26, 20));
@@ -186,10 +187,11 @@ export class WeatherSystem {
     const fogTex = makeFogTexture();
     for (let i = 0; i < 14; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: fogTex, transparent: true, opacity: 0.0, depthWrite: false, color: 0xc8d4e0,
+        map: fogTex, transparent: true, opacity: 0.0, depthWrite: false,
+        depthTest: true, color: 0xc8d4e0, sizeAttenuation: true,
       }));
       const a = Math.random() * Math.PI * 2;
-      const r = Math.random() * 80;
+      const r = 30 + Math.random() * 60;
       s.position.set(Math.cos(a) * r, 1.2 + Math.random() * 2.4, Math.sin(a) * r);
       s.scale.set(26, 8, 1);
       this.fogBanks.add(s);
@@ -225,8 +227,21 @@ export class WeatherSystem {
     }
     const nightish = 1 - smoothstep(5.5, 8.5, hours) * (1 - smoothstep(17.5, 20, hours));
     for (const s of this.fogBanks.children) {
-      s.material.opacity = this.fogAmount * 0.3 * (0.4 + nightish * 0.6);
+      s.material.opacity = this.fogAmount * 0.22 * (0.4 + nightish * 0.6);
       s.position.x += dt * 0.35;
+      // keep the banks far away so they never sit right in front of the camera
+      const dx = s.position.x - playerPos.x;
+      const dz = s.position.z - playerPos.z;
+      const d = Math.hypot(dx, dz);
+      if (d > 70) {
+        s.position.x = playerPos.x - dx * 0.95;
+        s.position.z = playerPos.z - dz * 0.95;
+      } else if (d < 22) {
+        // too close: push it back out to a comfortable distance
+        const a = Math.atan2(dz, dx) + Math.PI * 0.4;
+        s.position.x = playerPos.x + Math.cos(a) * 34;
+        s.position.z = playerPos.z + Math.sin(a) * 34;
+      }
       if (s.position.x > 90) s.position.x = -90;
     }
   }
@@ -249,12 +264,13 @@ function rainTexture() {
   return tex;
 }
 
-function makeFogTexture() {  const c = document.createElement('canvas');
+function makeFogTexture() {
+  const c = document.createElement('canvas');
   c.width = c.height = 256;
   const g = c.getContext('2d');
   const grad = g.createRadialGradient(128, 128, 10, 128, 128, 128);
-  grad.addColorStop(0, 'rgba(255,255,255,0.55)');
-  grad.addColorStop(0.5, 'rgba(255,255,255,0.22)');
+  grad.addColorStop(0, 'rgba(255,255,255,0.3)');
+  grad.addColorStop(0.45, 'rgba(255,255,255,0.12)');
   grad.addColorStop(1, 'rgba(255,255,255,0)');
   g.fillStyle = grad;
   g.fillRect(0, 0, 256, 256);
@@ -274,8 +290,14 @@ export class FireflySystem {
     const night = clamp(1 - smoothstep(4.8, 8.0, hours) * (1 - smoothstep(17.4, 20.4, hours)), 0, 1);
     const target = this.enabled ? night : 0;
     const m = this.points.material;
-    m.opacity += (target * 0.95 - m.opacity) * Math.min(1, dt * 2);
-    this.points.visible = m.opacity > 0.01;
+    // the material may be a raw ShaderMaterial (uniform) or PointsMaterial
+    if (m.uniforms?.opacity) {
+      m.uniforms.opacity.value += (target * 0.95 - m.uniforms.opacity.value) * Math.min(1, dt * 2);
+      this.points.visible = m.uniforms.opacity.value > 0.01;
+    } else {
+      m.opacity += (target * 0.95 - m.opacity) * Math.min(1, dt * 2);
+      this.points.visible = m.opacity > 0.01;
+    }
     if (!this.points.visible) return;
     this.time += dt;
     const pos = this.points.geometry.attributes.position;

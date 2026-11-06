@@ -58,7 +58,9 @@
         <span><b>Shift</b> бежать</span>
         <span><b>Мышь</b> осмотреться</span>
         <span><b>Колесо</b> приблизить</span>
-        <span><b>E</b> поговорить</span>
+        <span><b>E</b> поговорить / действие</span>
+        <span><b>Q</b> перекусить</span>
+        <span><b>R</b> погладить кота</span>
         <span><b>F</b> фонарь</span>
         <span><b>P</b> скрыть интерфейс</span>
       </div>
@@ -67,18 +69,57 @@
         <button id="btn-shuffle" class="active">Светлячки</button>
         <button id="btn-sound">Звук</button>
         <button id="btn-photo">Снимок</button>
+        <button id="btn-quests">Задания</button>
+        <button id="btn-journal">Дневник</button>
       </div>
     </div>
 
     <div class="panel panel-bottom-right" id="stat-panel">
       <div><span id="stat-people">0</span> жителей рядом</div>
       <div><span id="stat-houses">0</span> домиков в деревне</div>
+      <div><span id="stat-coins">0</span> монет</div>
+      <div class="stat-day">День <span id="stat-day">1</span> · <span id="stat-quests">0</span> заданий</div>
     </div>
 
-    <div id="bubble" class="bubble hidden"><p id="bubble-text"></p><span id="bubble-name"></span></div>
-    <div id="toast" class="toast hidden"></div>
+    <div class="panel panel-needs" id="needs-panel">
+      <div class="needs-title">Самочувствие</div>
+      <div class="needs-bars" id="needs-bars"></div>
+      <div class="inventory" id="inventory"></div>
+    </div>
+
+    <div class="panel panel-quests hidden" id="quest-panel">
+      <div class="needs-title">Задания</div>
+      <div id="quest-list"></div>
+    </div>
+
+    <div class="panel panel-journal hidden" id="journal-panel">
+      <div class="needs-title">Дневник</div>
+      <div id="journal-list"></div>
+    </div>
+
+    <div class="shop hidden" id="shop">
+      <div class="shop-card">
+        <h3 id="shop-title">Тёплая пекарня</h3>
+        <p id="shop-greeting"></p>
+        <div class="shop-cols">
+          <div>
+            <h4>Купить</h4>
+            <div id="shop-buy"></div>
+          </div>
+          <div>
+            <h4>Продать</h4>
+            <div id="shop-sell"></div>
+          </div>
+        </div>
+        <button id="shop-close">Закрыть</button>
+      </div>
+    </div>
+
+    <div class="bubble hidden" id="bubble"><p id="bubble-text"></p><span id="bubble-name"></span></div>
+    <div class="toast hidden" id="toast"></div>
 
     <div id="prompt" class="prompt hidden"><b>E</b> <span id="prompt-text">Поговорить</span></div>
+    <div id="prompt-place" class="prompt hidden"><b>E</b> <span id="prompt-place-text"></span></div>
   </div>
 
   <script type="module" src="js/village/main.js"></script>

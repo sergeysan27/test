@@ -6,9 +6,9 @@ import { createContactShadow } from './shadows.js';
 const NAMES = [
   ['Брат Антон', 'Хороший вечер, сосед. Слышал? Мельница опять скрипит — будто здоровается.'],
   ['Бабушка Оля', 'Иду я к колодцу за водой. Ночь уж близко, а днём жарко было.'],
-  ['Кот Мурзик', 'Мяу.'],
+  ['Тётушка Марфа', 'Кот у меня рыжий, как ты. Мурчит на коленях всю ночь.'],
   ['Девочка Аня', 'Мы собирали светлячков в банку! Мама сказала — выпусти, они по-другому не поймут.'],
-  ['Пёс Шарик', 'Гав! Я сторожу тут. Все спят — а я работаю.'],
+  ['Дедушка Егор', 'Гав! То есть... я сторожу тут. Все спят — а я работаю.'],
   ['Дядя Гриша', 'Слышал, на той неделе в горах гроза была. Вот до сих пор гул стоит.'],
   ['Мастер Пётр', 'Столярничаю по вечерам. Пилить при луне — дело смирное.'],
   ['Странник Илья', 'Я из-за реки. Иду уже третий день. Здесь тихо. Хорошо.'],
@@ -48,13 +48,26 @@ const CHATTER = [
   ['Я столярничаю по вечерам. Пилить при луне — дело смирное.', 'Приходите, покажу, как делаю шкатулки.'],
 ];
 
+// A daily routine: each villager has a place to be in the morning, at noon
+// and in the evening. It gives the village a pulse - the plaza is busy at
+// midday and empties out at night.
+const SCHEDULE = [
+  { from: 0, to: 6, place: 0 },      // asleep in their own house
+  { from: 6, to: 11, place: 1 },     // morning: well, bench, the shops
+  { from: 11, to: 16, place: 0 },    // midday: the plaza
+  { from: 16, to: 20, place: 2 },    // afternoon: the orchard and the far end
+  { from: 20, to: 24, place: 1 },    // evening: back to the lit streets
+];
+
 export function createNpcs(rng, layout, scene) {
   const npcs = [];
   for (let i = 0; i < NAMES.length; i++) {
     const [name, line] = NAMES[i];
-    const isAnimal = name.startsWith('Кот') || name.startsWith('Пёс');
+    const isAnimal = false;
     const anchor = WANDER[i % WANDER.length];
     const extra = CHATTER[i % CHATTER.length];
+    // Two of the villagers walk a dog; the rest are ordinary people.
+    const withPet = name === 'Дедушка Егор';
     const spec = {
       name, line,
       lines: [line, ...extra],
@@ -69,13 +82,15 @@ export function createNpcs(rng, layout, scene) {
       scale: isAnimal ? 1 : rng.range(0.94, 1.06),
       lantern: rng.chance(0.35),
       basket: rng.chance(0.25),
-      cat: name.startsWith('Кот'),
-      dog: name.startsWith('Пёс'),
+      cat: false,
+      dog: withPet,
       catColor: rng.pick([0x3a3a42, 0x8a6a3a, 0xd8d0c0, 0x2a2a2a]),
       dogColor: rng.pick([0xa07a4a, 0x4a3a2a, 0xd8d0c0]),
       petOffset: { x: rng.range(-0.7, 0.7), z: rng.range(-0.7, 0.7) },
       petScale: rng.range(0.9, 1.15),
       wander: anchor,
+      // a second spot the villager drifts towards in the afternoon
+      eveningAnchor: WANDER[(i + 5) % WANDER.length],
       speed: isAnimal ? rng.range(0.8, 1.4) : rng.range(0.7, 1.2),
       home: { x: anchor.x + rng.range(-3, 3), z: anchor.z + rng.range(-3, 3) },
       target: { x: anchor.x, z: anchor.z },
@@ -93,27 +108,56 @@ export function createNpcs(rng, layout, scene) {
   }
   return npcs;
 }
-export function updateNpcs(npcs, dt, time, terrainHeight, playerPos) {
+
+// Picks the spot a villager should be heading to at the given hour.
+function scheduleAnchor(spec, hours) {
+  let slot = SCHEDULE[0];
+  for (const s of SCHEDULE) if (hours >= s.from && hours < s.to) slot = s;
+  if (slot.place === 1) return spec.wander;
+  if (slot.place === 2) return spec.eveningAnchor;
+  return { x: 0, z: 0, r: 9 };
+}
+
+export function updateNpcs(npcs, dt, time, terrainHeight, playerPos, collision, hours = 12) {
   for (const npc of npcs) {
     const spec = npc.userData.spec;
     const data = npc.userData;
     const speed = spec.speed;
+    // the villager drifts towards the place that belongs to this hour
+    const anchor = scheduleAnchor(spec, hours);
     const dx = spec.target.x - spec.home.x;
     const dz = spec.target.z - spec.home.z;
     const dist = Math.hypot(dx, dz);
     if (dist < 0.4) {
-      // pick new target in wander zone
+      // pick a new target inside the zone that belongs to this hour
       const a = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(Math.random()) * spec.wander.r;
-      spec.target.x = spec.wander.x + Math.cos(a) * r;
-      spec.target.z = spec.wander.z + Math.sin(a) * r;
+      const r = Math.sqrt(Math.random()) * anchor.r;
+      spec.target.x = anchor.x + Math.cos(a) * r;
+      spec.target.z = anchor.z + Math.sin(a) * r;
       spec.home.x = spec.target.x;
       spec.home.z = spec.target.z;
     }
     const ang = Math.atan2(dx, dz);
     const move = Math.min(dist, speed * dt);
-    npc.position.x += Math.sin(ang) * move;
-    npc.position.z += Math.cos(ang) * move;
+    let nx = npc.position.x + Math.sin(ang) * move;
+    let nz = npc.position.z + Math.cos(ang) * move;
+
+    // villagers walk around buildings instead of through them
+    if (collision) {
+      const fixed = collision.resolve(nx, nz, 0.45);
+      if (Math.abs(fixed.x - nx) > 0.001 || Math.abs(fixed.z - nz) > 0.001) {
+        // blocked: pick a new destination next time
+        spec.home.x = fixed.x;
+        spec.home.z = fixed.z;
+        spec.target.x = fixed.x;
+        spec.target.z = fixed.z;
+      }
+      nx = fixed.x;
+      nz = fixed.z;
+    }
+
+    npc.position.x = nx;
+    npc.position.z = nz;
     npc.rotation.y = dampAngle(npc.rotation.y, ang, 6, dt);
     npc.position.y = terrainHeight(npc.position.x, npc.position.z);
     const sh = data.shadow;

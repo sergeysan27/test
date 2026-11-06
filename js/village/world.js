@@ -163,8 +163,8 @@ export function buildLayout(rng) {
     props.push({ kind: 'place', ...p });
   }
   props.push({ kind: 'bonfire', x: 4.5, z: -4.5, rot: 0, scale: 1 });
-  props.push({ kind: 'garland', x: -6, z: 3.5, rot: 0.35, scale: 1 });
-  props.push({ kind: 'garland', x: 5, z: 7.5, rot: -0.5, scale: 1 });
+  props.push({ kind: 'garland', x: -8, z: 11, rot: 0.35, scale: 1 });
+  props.push({ kind: 'garland', x: 9, z: 13, rot: -0.5, scale: 1 });
   guard = 0;
   while (props.length < 90 && guard++ < 3000) {
     const a = rng.next() * Math.PI * 2;

@@ -18,6 +18,15 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Ambience } from './audio.js';
 import { LightPool } from './lights.js';
 import { buildBirds, updateBirds, buildGroundMist, updateMist } from './life.js';
+import { CollisionWorld } from './collision.js';
+import { LifeSim, NEED_DEFS, ITEM_DEFS, QUESTS } from './sim.js';
+import {
+  buildFallingLeaves, updateLeaves, buildButterflies, updateButterflies,
+  buildRipples, updateRipples, applyTreeSway, buildMotes, updateMotes,
+} from './atmosphere.js';
+import { buildInteractables, nearestInteractable } from './interactions.js';
+import { Cat } from './cat.js';
+import { shopList, buyItem, sellItem } from './shops.js';
 
 class Player {
   constructor(scene, terrainHeight) {
@@ -48,14 +57,27 @@ class Player {
     const body = new THREE.Group();
     this.body.add(body);
 
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.22, 0.66, 12), coat);
-    torso.position.y = 1.06;
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.235, 0.245, 0.68, 12), coat);
+    torso.position.y = 1.04;
     torso.castShadow = true;
     body.add(torso);
 
-    const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.21, 0.2, 12), pants);
-    hips.position.y = 0.7;
+    // shoulders
+    const shoulders = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 8), coat);
+    shoulders.position.y = 1.36;
+    shoulders.scale.set(1.25, 0.62, 0.92);
+    shoulders.castShadow = true;
+    body.add(shoulders);
+
+    const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.225, 0.215, 0.22, 12), pants);
+    hips.position.y = 0.72;
     body.add(hips);
+
+    // neck fills the gap between the shoulders and the head
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.1, 0.2, 10), skin);
+    neck.position.y = 1.44;
+    neck.castShadow = true;
+    body.add(neck);
 
     const scarfRing = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.07, 6, 14), scarf);
     scarfRing.position.y = 1.4;
@@ -118,7 +140,7 @@ class Player {
     mouth.position.set(0, 0.115, 0.185);
     mouth.rotation.z = Math.PI;
     this.head.add(mouth);
-    this.head.position.y = 1.52;
+    this.head.position.y = 1.5;
     body.add(this.head);
 
     // backpack
@@ -147,7 +169,7 @@ class Player {
     const base = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.065, 0.03, 8), metal);
     base.position.y = -0.09;
     lantern.add(base);
-    const llight = new THREE.PointLight(0xffb060, 3.0, 11, 2);
+    const llight = new THREE.PointLight(0xffb060, 3.0, 9, 2);
     llight.position.y = -0.02;
     lantern.add(llight);
     const lglow = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -187,6 +209,10 @@ class Village {
     this._fpsFrames = 0;
     this.onPlaceChange = null;
     this.onToast = null;
+    this.sim = new LifeSim();
+    this.shopOpen = null;
+    this.nearbyPlace = null;
+    this.hudTimer = 0;
     this.setupRenderer();
     this.buildScene();
     this.bindEvents();
@@ -226,6 +252,7 @@ class Village {
     // houses
     this.houses = [];
     this.houseLights = [];
+    this.interiorEmitters = [];
     this.staticGroups = [];
     this.lightPool = new LightPool(scene, 12);
     for (const spec of this.layout.houses) {
@@ -240,6 +267,19 @@ class Village {
       const emitter = { position: pos, color: 0xffb266, intensity: 0, distance: 9 };
       this.lightPool.add(emitter);
       this.houseLights.push({ emitter, spec });
+
+      // lamps inside the room
+      const interior = h.getObjectByProperty('isInterior', true);
+      const emitters = interior?.userData?.emitters;
+      if (emitters) {
+        const rot = h.rotation.y;
+        for (const e of emitters) {
+          const wp = e.position.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), rot).add(h.position);
+          const emitter = { position: wp, color: e.color, intensity: 0, distance: e.distance };
+          this.lightPool.add(emitter);
+          this.interiorEmitters.push({ emitter, lit: spec.lit });
+        }
+      }
     }
 
     // merge each house into a handful of meshes to keep draw calls low
@@ -350,6 +390,24 @@ class Village {
     // water pond
     this.buildWater();
 
+    // collision world: solid buildings
+    this.collision = new CollisionWorld();
+    for (const spec of this.layout.houses) {
+      this.collision.addBox(
+        spec.x, spec.z,
+        spec.w / 2 + 0.1, spec.d / 2 + 0.1,
+        spec.rot,
+        spec.h + spec.roofH
+      );
+    }
+    // the mill, the church and the well block the way too
+    const mill = PLACES.find((p) => p.name === 'Мельница');
+    if (mill) this.collision.addBox(mill.x, mill.z, 2.4, 2.4, 0, 9);
+    const church = PLACES.find((p) => p.name === 'Церковная площадь');
+    if (church) this.collision.addBox(church.x, church.z - 4.6, 1.5, 1.5, 0, 14);
+    const well = PLACES.find((p) => p.name === 'Колодец');
+    if (well) this.collision.addBox(well.x, well.z, 1.1, 1.1, 0, 2.6);
+
     // npcs
     this.npcs = createNpcs(rng, this.layout, scene);
     for (const n of this.npcs) {
@@ -363,6 +421,15 @@ class Village {
     this.player.yaw = Math.PI;
     this.player.body.position.copy(this.player.pos);
 
+    // the ginger cat lives on the bench near the plaza
+    this.cat = new Cat(scene, { x: -11, z: 6.4 }, terrainHeight);
+    this.cat.onSay = (text) => {
+      this.onToast?.(text);
+    };
+
+    // interactable places
+    this.interactables = buildInteractables(this.layout);
+
     // fireflies
     this.fireflies = new FireflySystem(buildFireflies(260));
     scene.add(this.fireflies.points);
@@ -372,6 +439,16 @@ class Village {
     scene.add(this.birds);
     this.mist = buildGroundMist();
     scene.add(this.mist);
+
+    // living atmosphere
+    this.leaves = buildFallingLeaves(90);
+    scene.add(this.leaves);
+    this.butterflies = buildButterflies(14);
+    scene.add(this.butterflies);
+    this.ripples = buildRipples(12);
+    scene.add(this.ripples);
+    this.motes = buildMotes(60);
+    scene.add(this.motes);
 
     // systems
     this.sky = new SkySystem(scene);
@@ -486,7 +563,7 @@ class Village {
     composer.addPass(new RenderPass(this.scene, this.camera));
     const bloom = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.58, 0.72, 0.78
+      0.42, 0.62, 0.85
     );
     composer.addPass(bloom);
     composer.addPass(new OutputPass());
@@ -508,9 +585,13 @@ class Village {
     window.addEventListener('resize', () => this.onResize());
     window.addEventListener('keydown', (e) => {
       this.keys[e.code] = true;
-      if (e.code === 'KeyE') this.talk();
+      if (e.code === 'KeyE') this.interact();
       if (e.code === 'KeyF') this.togglePlayerLamp();
       if (e.code === 'KeyP') this.togglePhotoMode();
+      if (e.code === 'KeyQ') this.quickEat();
+      if (e.code === 'KeyR') this.petCat();
+      if (e.code === 'KeyC') this.toggleShop();
+      if (e.code === 'Escape') this.closeShop();
     });
     window.addEventListener('keyup', (e) => { this.keys[e.code] = false; });
 
@@ -635,6 +716,160 @@ class Village {
     this.onTalk?.(spec, pick);
   }
 
+  // The E key: talk to a villager if one is close, otherwise use the place
+  // the player is standing at.
+  interact() {
+    if (this.shopOpen) {
+      this.closeShop();
+      return;
+    }
+    const npc = this.nearbyNpc;
+    if (npc) {
+      this.talk();
+      const spec = npc.userData.spec;
+      const sim = this.sim;
+      // talking to somebody for the first time counts as making friends
+      if (!sim.greeted.has(spec.name)) {
+        sim.greeted.add(spec.name);
+        sim.stats.talked += 1;
+        const level = sim.befriend(spec.name, 8);
+        sim.log(`Познакомились: ${spec.name}`);
+        this.onToast?.(`Знакомство: ${spec.name} (дружба ${Math.round(level)})`);
+      } else {
+        sim.befriend(spec.name, 2);
+      }
+      return;
+    }
+    const place = this.nearbyPlace;
+    if (!place) {
+      this.onToast?.('Здесь ничего нет');
+      return;
+    }
+    this.usePlace(place);
+  }
+
+  // Each interactable place has its own small effect on the simulation.
+  usePlace(place) {
+    const sim = this.sim;
+    switch (place.id) {
+      case 'well':
+        sim.addItem('water', 1);
+        sim.stats.water += 1;
+        sim.needs.thirst = clamp(sim.needs.thirst + 12, 0, 100);
+        this.onToast?.('Ведро воды из колодца. Прохладно и чисто.');
+        break;
+      case 'bench':
+        sim.stats.rested += 1;
+        sim.needs.energy = clamp(sim.needs.energy + 30, 0, 100);
+        sim.needs.mood = clamp(sim.needs.mood + 6, 0, 100);
+        this.onToast?.('Лавка скрипнула. Минутка покоя.');
+        break;
+      case 'bonfire':
+        sim.stats.warmed += 1;
+        sim.needs.energy = clamp(sim.needs.energy + 14, 0, 100);
+        sim.needs.mood = clamp(sim.needs.mood + 9, 0, 100);
+        this.onToast?.('Тепло от костра разлилось по спине.');
+        break;
+      case 'church':
+        sim.stats.prayed += 1;
+        sim.needs.mood = clamp(sim.needs.mood + 12, 0, 100);
+        this.onToast?.('Тихое пение поднимается к небу.');
+        break;
+      case 'orchard': {
+        if (!sim.greeted.has('apple-tree')) {
+          sim.greeted.add('apple-tree');
+        }
+        const got = 1 + (Math.random() < 0.4 ? 1 : 0);
+        sim.addItem('apple', got);
+        sim.stats.apples += got;
+        sim.log(`Собрано яблок: ${got}`);
+        this.onToast?.(`Сорвал${got > 1 ? 'и' : ''} ${got} яблок${got > 1 ? 'а' : ''} с ветки.`);
+        break;
+      }
+      case 'dock':
+        sim.stats.fished += 1;
+        sim.addItem('fish', 1);
+        sim.log('Поймана рыба у пристани');
+        this.onToast?.('Поймал рыбу. Она ещё дёргается.');
+        break;
+      case 'bakery':
+      case 'mill':
+        this.openShop(place.id === 'bakery' ? 'bakery' : 'mill');
+        break;
+      default:
+        if (place.house) {
+          this.sleep(place);
+          break;
+        }
+        this.onToast?.(place.label);
+    }
+    this.checkQuests();
+  }
+
+  // Sleeping at a house ends the day: the village wakes up again at dawn.
+  sleep(place) {
+    const sim = this.sim;
+    if (this.hours > 4 && this.hours < 20) {
+      this.onToast?.('Спать сейчас не хочется. Дождись ночи.');
+      return;
+    }
+    sim.startNewDay();
+    this.setTime(6.4);
+    this.player.pos.set(place.house.x + Math.sin(place.house.rot) * (place.house.d / 2 + 1.2), 0, place.house.z + Math.cos(place.house.rot) * (place.house.d / 2 + 1.2));
+    this.player.pos.y = terrainHeight(this.player.pos.x, this.player.pos.z);
+    this.onToast?.(`День ${sim.day}. Утро. Всё как было, только светлее.`);
+  }
+
+  // Eat the best food in the bag: Q.
+  quickEat() {
+    const sim = this.sim;
+    for (const key of ['bread', 'fish', 'apple']) {
+      if (sim.hasItem(key)) {
+        const msg = sim.useItem(key);
+        this.onToast?.(msg || 'Немного перекусили.');
+        this.checkQuests();
+        return;
+      }
+    }
+    this.onToast?.('В сумке ничего съедобного.');
+  }
+
+  // Pet the cat if it is nearby: R.
+  petCat() {
+    const d = Math.hypot(this.cat.pos.x - this.player.pos.x, this.cat.pos.z - this.player.pos.z);
+    if (d > 3.2) {
+      this.onToast?.('Рыжий кот не рядом.');
+      return;
+    }
+    this.cat.pet();
+    this.sim.befriend('Рыжий кот', 3);
+  }
+
+  checkQuests() {
+    const finished = this.sim.checkQuests();
+    for (const q of finished) {
+      this.onToast?.(`Задание выполнено: «${q.title}» +${q.reward} монет`);
+    }
+    if (finished.length) this.refreshHud(true);
+  }
+
+  // ---------------- Shop ----------------
+  openShop(shopId) {
+    this.shopOpen = shopId;
+    this.onShop?.(shopId);
+  }
+
+  closeShop() {
+    if (!this.shopOpen) return;
+    this.shopOpen = null;
+    this.onShop?.(null);
+  }
+
+  toggleShop() {
+    if (this.shopOpen) this.closeShop();
+    else if (this.nearbyPlace?.shop) this.openShop(this.nearbyPlace.shop === true ? 'bakery' : this.nearbyPlace.shop);
+  }
+
   togglePlayerLamp() {
     this.playerLampOn = this.playerLampOn === undefined ? false : !this.playerLampOn;
     this.onToast?.(this.playerLampOn ? 'Фонарь включён' : 'Фонарь выключен');
@@ -683,16 +918,11 @@ class Village {
       next.x = (next.x / r) * (WORLD.groundRadius - 3);
       next.z = (next.z / r) * (WORLD.groundRadius - 3);
     }
-    // collide with houses (simple circle around house footprint)
-    for (const spec of this.layout.houses) {
-      const rad = Math.max(spec.w, spec.d) * 0.62 + 0.45;
-      const dx = next.x - spec.x;
-      const dz = next.z - spec.z;
-      const d = Math.hypot(dx, dz);
-      if (d < rad && d > 0.001) {
-        next.x = spec.x + (dx / d) * rad;
-        next.z = spec.z + (dz / d) * rad;
-      }
+    // solid buildings: the player cannot walk through walls
+    if (this.collision) {
+      const fixed = this.collision.resolve(next.x, next.z, 0.4);
+      next.x = fixed.x;
+      next.z = fixed.z;
     }
     p.pos.x = next.x;
     p.pos.z = next.z;
@@ -708,7 +938,17 @@ class Village {
     p.armR.rotation.x = w * 0.5;
     p.bob = Math.abs(Math.sin(p.phase)) * Math.min(0.06, speedNow * 0.02);
     p.body.position.set(p.pos.x, p.pos.y + p.bob, p.pos.z);
-    p.body.rotation.y = dampAngle(p.body.rotation.y, p.yaw + Math.PI, 10, dt);
+
+    // The character turns to face where it walks. The camera yaw only
+    // decides which way "forward" means, not which way the body looks.
+    if (speedNow > 0.35) {
+      const moveAngle = Math.atan2(p.vel.x, p.vel.z);
+      p.body.rotation.y = dampAngle(p.body.rotation.y, moveAngle, 11, dt);
+    } else {
+      // standing still: slowly turn back towards the camera
+      const restAngle = p.yaw + Math.PI;
+      p.body.rotation.y = dampAngle(p.body.rotation.y, restAngle, 3, dt);
+    }
     p.head.rotation.x = clamp(p.pitch * 0.4, -0.5, 0.4);
 
     // contact shadow follows the player
@@ -726,7 +966,20 @@ class Village {
     );
     const desired = focus.clone().add(offset);
     desired.y = Math.max(desired.y, terrainHeight(desired.x, desired.z) + 1.0);
-    this.camera.position.lerp(desired, 1 - Math.exp(-11 * dt));
+
+    // Keep the camera outside buildings: when a wall is in the way the boom
+    // slides sideways around the obstacle instead of snapping into the back
+    // of the character.
+    let camTarget = desired;
+    if (this.collision) {
+      const clamped = this.collision.resolveCameraBoom(
+        focus.x, focus.y, focus.z,
+        desired.x, desired.y, desired.z,
+        0.4
+      );
+      camTarget = new THREE.Vector3(clamped.x, clamped.y, clamped.z);
+    }
+    this.camera.position.lerp(camTarget, 1 - Math.exp(-14 * dt));
     this.camera.lookAt(focus);
 
     if (this.playerLamp) {
@@ -740,10 +993,10 @@ class Village {
     const on = this.playerLampOn === undefined ? true : this.playerLampOn;
     const target = on ? night : 0;
     const cur = p.lanternLight.intensity;
-    const next = damp(cur, target * 4.5, 4, dt);
+    const next = damp(cur, target * 2.1, 4, dt);
     p.lanternLight.intensity = next;
-    p.lanternGlass.material.emissiveIntensity = 0.3 + (next / 4.5) * 3.2;
-    p.lanternGlow.material.opacity = (next / 4.5) * 0.75;
+    p.lanternGlass.material.emissiveIntensity = 0.3 + (next / 2.1) * 1.6;
+    p.lanternGlow.material.opacity = (next / 2.1) * 0.5;
     // gentle sway
     p.lantern.rotation.z = Math.sin(this.time * 2.4) * 0.09;
     p.lantern.rotation.x = Math.sin(this.time * 1.9 + 1) * 0.06;
@@ -796,12 +1049,16 @@ class Village {
       const spec = ud.spec;
       const lit = spec.lit ? night : 0;
       for (const w of ud.windows) {
-        w.pane.material.emissiveIntensity = 0.2 + lit * 2.2;
+        w.pane.material.emissiveIntensity = 0.25 + lit * 3.4;
       }
     }
     for (const h of this.houseLights) {
       const lit = h.spec.lit ? night : 0;
       h.emitter.intensity = damp(h.emitter.intensity, lit * 3.6, 4, dt);
+    }
+    // the light pool also drives the interior lamps of every house
+    for (const e of this.interiorEmitters) {
+      e.emitter.intensity = damp(e.emitter.intensity, e.lit ? night * 2.4 : 0, 4, dt);
     }
     this.lightPool.update(this.camera.position);
   }
@@ -853,9 +1110,10 @@ class Village {
     }
 
     this.updatePlayer(dt);
-    updateNpcs(this.npcs, dt, this.time, terrainHeight, this.player.pos);
+    updateNpcs(this.npcs, dt, this.time, terrainHeight, this.player.pos, this.collision, this.hours);
     this.updateNpcInteraction();
     this.updatePlace();
+    this.updateNearbyPlace();
     this.updateLamps(dt, this.time);
     this.updatePlayerLantern(dt);
     this.adaptQuality(dt);
@@ -864,6 +1122,27 @@ class Village {
     this.weather.update(dt, this.player.pos, this.hours);
     updateBirds(this.birds, dt, this.time, this.hours, this.player.pos);
     updateMist(this.mist, dt, this.time, this.hours);
+
+    // living atmosphere
+    const windStrength = 0.5 + (this.weather?.rainAmount ?? 0) * -0.4;
+    updateLeaves(this.leaves, dt, this.time, this.player.pos, terrainHeight, 0.55 + windStrength * 0.4);
+    updateButterflies(this.butterflies, dt, this.time, this.hours, this.player.pos);
+    updateRipples(this.ripples, dt, this.time, this.player.pos, { x: 58, z: 44 }, 13);
+    updateMotes(this.motes, dt, this.time, this.player.pos, terrainHeight);
+    applyTreeSway(this.treeGroup, this.time, 1);
+
+    // the cat and the simulation
+    this.cat.update(dt, this.time, this.player.pos, this.sim);
+    const moving = Math.hypot(this.player.vel.x, this.player.vel.z) > 0.4;
+    this.sim.advance(dt, this.hours, moving, this.weather);
+    this.catchFireflies();
+    this.checkQuests();
+
+    this.hudTimer += dt;
+    if (this.hudTimer > 0.4) {
+      this.hudTimer = 0;
+      this.refreshHud();
+    }
 
     if (this.ambience) {
       const nearWater = Math.hypot(this.player.pos.x - 56, this.player.pos.z - 42) < 26;
@@ -889,8 +1168,8 @@ class Village {
       for (const g of this.garlands) {
         for (const l of g.lanterns) {
           const flick = 1 + Math.sin(this.time * 3 + l.phase) * 0.08;
-          l.mesh.material.emissiveIntensity = 0.2 + gnight * 1.1 * flick;
-          l.glow.material.opacity = gnight * 0.3 * flick;
+          l.mesh.material.emissiveIntensity = 0.2 + gnight * 0.9 * flick;
+          l.glow.material.opacity = gnight * 0.14 * flick;
         }
         g.emitter.intensity = damp(g.emitter.intensity, gnight * 3.5, 4, dt);
       }
@@ -936,7 +1215,116 @@ class Village {
     }
     const h = document.getElementById('stat-houses');
     if (h) h.textContent = this.layout.houses.length;
-  }}
+  }
+
+  // ---- HUD for the life simulation ----
+  refreshHud() {
+    const sim = this.sim;
+    const coins = document.getElementById('stat-coins');
+    if (coins) coins.textContent = sim.coins;
+    const day = document.getElementById('stat-day');
+    if (day) day.textContent = sim.day;
+    const quests = document.getElementById('stat-quests');
+    if (quests) quests.textContent = sim.done.size;
+
+    // needs
+    const bars = document.getElementById('needs-bars');
+    if (bars && !bars.children.length) {
+      for (const def of NEED_DEFS) {
+        const row = document.createElement('div');
+        row.className = 'need-row';
+        row.dataset.need = def.key;
+        row.innerHTML = `<span>${def.label}</span><span class="need-bar"><i style="background:${def.color}"></i></span><span class="need-val">0</span>`;
+        bars.appendChild(row);
+      }
+    }
+    if (bars) {
+      for (const def of NEED_DEFS) {
+        const row = bars.querySelector(`[data-need="${def.key}"]`);
+        if (!row) continue;
+        const v = sim.needs[def.key] ?? 0;
+        row.querySelector('i').style.width = `${Math.round(v)}%`;
+        row.querySelector('.need-val').textContent = Math.round(v);
+        row.classList.toggle('low', v < 25);
+      }
+    }
+
+    // inventory
+    const inv = document.getElementById('inventory');
+    if (inv) {
+      const entries = Object.entries(sim.inventory).filter(([, n]) => n > 0);
+      if (!entries.length) {
+        inv.innerHTML = '<span class="inv-empty">Сумка пуста</span>';
+      } else {
+        inv.innerHTML = entries.map(([k, n]) =>
+          `<span class="inv-item">${ITEM_DEFS[k]?.short || k}<b>${n}</b></span>`
+        ).join('');
+      }
+    }
+
+    // quest list
+    const list = document.getElementById('quest-list');
+    if (list) {
+      list.innerHTML = QUESTS.map((q) => {
+        const p = sim.questProgress(q);
+        const done = sim.questDone(q);
+        return `<div class="quest-row ${done ? 'done' : ''}"><i>${done ? '✓' : `${p}/${q.goal}`}</i><span>${q.title}<br><em style="font-style:normal;opacity:.65">${q.desc}</em></span></div>`;
+      }).join('');
+    }
+
+    // journal
+    const journal = document.getElementById('journal-list');
+    if (journal) {
+      if (!sim.journal.length) {
+        journal.innerHTML = '<div class="journal-row">Пока пусто. Жизнь впереди.</div>';
+      } else {
+        journal.innerHTML = sim.journal.slice(0, 12).map((e) =>
+          `<div class="journal-row"><b>Д${e.day}</b>${e.text}</div>`
+        ).join('');
+      }
+    }
+  }
+
+  // Fireflies can be caught at night by walking right into them.
+  catchFireflies() {
+    const sim = this.sim;
+    if (sim.stats.caught >= 5) return;
+    const night = this.hours < 6 || this.hours > 18.4;
+    if (!night) return;
+    const pts = this.fireflies.points;
+    if (!pts.visible) return;
+    const pos = pts.geometry.attributes.position;
+    const p = this.player.pos;
+    const arr = pos.array;
+    for (let i = 0; i < arr.length; i += 3) {
+      const dx = arr[i] - p.x;
+      const dy = arr[i + 1] - (p.y + 1.2);
+      const dz = arr[i + 2] - p.z;
+      if (dx * dx + dy * dy + dz * dz < 1.4) {
+        // caught: pull the firefly out of the swarm
+        arr[i + 1] = -900;
+        sim.stats.caught += 1;
+        sim.needs.mood = clamp(sim.needs.mood + 4, 0, 100);
+        this.onToast?.(`Светлячок в банке: ${sim.stats.caught}/5`);
+        break;
+      }
+    }
+  }
+
+  // Finds the closest place the player can interact with and shows a hint.
+  updateNearbyPlace() {
+    const place = nearestInteractable(this.interactables, this.player.pos);
+    if (place !== this.nearbyPlace) {
+      this.nearbyPlace = place;
+      const el = document.getElementById('prompt-place');
+      const txt = document.getElementById('prompt-place-text');
+      if (el) {
+        el.classList.toggle('hidden', !place);
+        if (place && txt) txt.textContent = place.label;
+      }
+    }
+  }
+}
 
 function smoothstepLocal(e0, e1, x) {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -988,6 +1376,57 @@ async function boot() {
     clearTimeout(village._bubbleTimer);
     village._bubbleTimer = setTimeout(() => b.classList.add('hidden'), 5200);
   };
+
+  // quest panel toggle
+  const questPanel = document.getElementById('quest-panel');
+  document.getElementById('btn-quests')?.addEventListener('click', () => {
+    questPanel.classList.toggle('hidden');
+    document.getElementById('journal-panel')?.classList.add('hidden');
+  });
+  const journalPanel = document.getElementById('journal-panel');
+  document.getElementById('btn-journal')?.addEventListener('click', () => {
+    journalPanel.classList.toggle('hidden');
+    questPanel.classList.add('hidden');
+  });
+
+  // shop window
+  const shopEl = document.getElementById('shop');
+  document.getElementById('shop-close')?.addEventListener('click', () => village.closeShop());
+  village.onShop = (shopId) => {
+    if (!shopId) {
+      shopEl.classList.add('hidden');
+      return;
+    }
+    const shop = shopList(shopId);
+    document.getElementById('shop-title').textContent = shop.title;
+    document.getElementById('shop-greeting').textContent = shop.greeting;
+    renderShopItems('shop-buy', shop.stock, false);
+    renderShopItems('shop-sell', shop.buys, true);
+    shopEl.classList.remove('hidden');
+  };
+
+  function renderShopItems(containerId, items, isSell) {
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    box.innerHTML = '';
+    for (const item of items) {
+      const btn = document.createElement('button');
+      btn.className = 'shop-item';
+      const have = village.sim.hasItem(item.id);
+      btn.innerHTML = `<span>${ITEM_DEFS[item.id]?.label || item.id}<em>${item.desc}</em></span><b>${item.price}</b>`;
+      if (isSell && !have) btn.disabled = true;
+      btn.addEventListener('click', () => {
+        const res = isSell ? sellItem(village.shopOpen, item.id, village.sim) : buyItem(village.shopOpen, item.id, village.sim);
+        village.onToast?.(res.message);
+        village.refreshHud();
+        village.checkQuests();
+        if (village.shopOpen) village.onShop(village.shopOpen);
+      });
+      box.appendChild(btn);
+    }
+  }
+
+  village.refreshHud();
 
   setProgress(1, 'Готово');
   await new Promise((r) => setTimeout(r, 320));
