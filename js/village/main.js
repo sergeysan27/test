@@ -8,6 +8,9 @@ import { makeRng, clamp, lerp, damp } from './util.js';
 import { buildGround, buildLayout, terrainHeight, isOnRoad, PLACES } from './world.js';
 import { buildHouse, buildTree, buildTreeInstances, buildLamp, buildProp, buildFireflies, createMaterialCache } from './props.js';
 import { createNpcs, updateNpcs, dampAngle, npcLine } from './npcs.js';
+import { villagerLine, villagerStatus } from './dialogue.js';
+import { WorldBridge } from './world-bridge.js';
+import { loadWorld, saveWorld, clearWorld } from './world-sim.js';
 import { SkySystem, WeatherSystem, FireflySystem } from './systems.js';
 import { pathTexture } from './textures.js';
 import { glowSprite } from './textures.js';
@@ -408,12 +411,11 @@ class Village {
     const well = PLACES.find((p) => p.name === 'Колодец');
     if (well) this.collision.addBox(well.x, well.z, 1.1, 1.1, 0, 2.6);
 
-    // npcs
-    this.npcs = createNpcs(rng, this.layout, scene);
-    for (const n of this.npcs) {
-      n.position.y = terrainHeight(n.position.x, n.position.z);
-      scene.add(n);
-    }
+    // The living world: villagers are simulated independently of the render
+    // loop, and the simulation carries on while the game is closed.
+    this.worldBridge = new WorldBridge(scene, this.layout, terrainHeight, rng);
+    this.npcs = [...this.worldBridge.actors.values()];
+    this.world = this.worldBridge.world;
 
     // player
     this.player = new Player(scene, terrainHeight);
@@ -582,6 +584,13 @@ class Village {
   }
 
   bindEvents() {
+    // the world is written out whenever the page is closed or hidden, so
+    // the village continues exactly where it stopped
+    window.addEventListener('beforeunload', () => this.worldBridge?.save());
+    window.addEventListener('pagehide', () => this.worldBridge?.save());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') this.worldBridge?.save();
+    });
     window.addEventListener('resize', () => this.onResize());
     window.addEventListener('keydown', (e) => {
       this.keys[e.code] = true;
@@ -652,6 +661,11 @@ class Village {
 
   setWeather(kind) {
     this.weatherKind = kind;
+    // the weather lives in the world, so it survives a reload
+    if (this.world) {
+      this.world.weather.kind = kind;
+      this.world.weather.nextIn = 6;
+    }
     if (kind === 'rain') this.weather.set(1, 0.35);
     else if (kind === 'fog') this.weather.set(0, 1);
     else this.weather.set(0, 0.12);
@@ -660,6 +674,8 @@ class Village {
   }
 
   setTime(h) {
+    // the slider moves the world's clock, not just a display value
+    this.world.time = h * 60;
     this.targetHours = h;
     this.hours = h;
     const slider = document.getElementById('time-slider');
@@ -711,6 +727,15 @@ class Village {
       this.onToast?.('Рядом никого нет');
       return;
     }
+    // the villager answers according to what the simulation says about
+    // them: their activity, the hour, the weather and their friendship
+    const villager = this.world?.villagers?.find((v) => v.id === npc.userData.villagerId);
+    if (villager) {
+      const line = villagerLine(villager, this.world, this.hours);
+      const spec = npc.userData.spec;
+      this.onTalk?.(spec, line);
+      return;
+    }
     const spec = npc.userData.spec;
     const pick = npcLine(spec, this.hours);
     this.onTalk?.(spec, pick);
@@ -737,6 +762,19 @@ class Village {
         this.onToast?.(`Знакомство: ${spec.name} (дружба ${Math.round(level)})`);
       } else {
         sim.befriend(spec.name, 2);
+      }
+      // the villager reacts: they turn towards the player, remember the
+      // meeting and grow a little fond of them
+      const villager = this.world?.villagers?.find((v) => v.id === npc.userData.villagerId);
+      if (villager && this.world) {
+        const rel = this.world.relation(0, villager.id);
+        rel.meetings++;
+        this.world.adjustRelation(0, villager.id, 4);
+        villager.social = Math.min(100, villager.social + 6);
+        villager.fun = Math.min(100, villager.fun + 2);
+        villager.talkTo = 0;
+        villager.talkTimer = 10;
+        villager.mood = 'happy';
       }
       return;
     }
@@ -1016,7 +1054,14 @@ class Village {
       if (prompt) {
         prompt.classList.toggle('hidden', !best);
         const txt = document.getElementById('prompt-text');
-        if (txt && best) txt.textContent = `Поговорить — ${best.userData.spec.name}`;
+        if (txt && best) {
+          // the prompt tells you what the villager is doing right now
+          const villager = this.world?.villagers?.find((v) => v.id === best.userData.villagerId);
+          const status = villager ? villagerStatus(villager) : '';
+          txt.textContent = status
+            ? `Поговорить — ${best.userData.spec.name} (${status})`
+            : `Поговорить — ${best.userData.spec.name}`;
+        }
       }
     }
   }
@@ -1101,16 +1146,21 @@ class Village {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     this.time += dt;
 
-    // the village keeps its own rhythm: minutes drift forward on their own
+    // the village keeps its own rhythm: the world clock advances on its own
+    // timer and everything - sky, lamps, villagers - follows it
     if (this.autoTime !== false) {
-      this.hours = (this.hours + dt * 0.035) % 24;
+      this.hours = this.world.hours;
       this.updateClockLabel();
       const slider = document.getElementById('time-slider');
       if (slider) slider.value = this.hours;
     }
 
     this.updatePlayer(dt);
-    updateNpcs(this.npcs, dt, this.time, terrainHeight, this.player.pos, this.collision, this.hours);
+    // The world runs on its own clock, independent of the frame rate.
+    this.worldBridge.playerPos = this.player.pos;
+    this.worldBridge.update(dt, this.hours);
+    // the world's clock is the village's clock
+    this.hours = this.world.hours;
     this.updateNpcInteraction();
     this.updatePlace();
     this.updateNearbyPlace();
@@ -1272,16 +1322,56 @@ class Village {
       }).join('');
     }
 
-    // journal
+    // journal: the village chronicle plus the player's own notes
     const journal = document.getElementById('journal-list');
     if (journal) {
-      if (!sim.journal.length) {
+      const own = sim.journal.map((e) => ({ text: e.text, kind: 'own', day: e.day, time: 0, minute: 0 }));
+      const world = (this.world?.chronicle ?? []).map((c) => ({ ...c, kind: c.kind }));
+      const all = [...world, ...own].slice(0, 24);
+      if (!all.length) {
         journal.innerHTML = '<div class="journal-row">Пока пусто. Жизнь впереди.</div>';
       } else {
-        journal.innerHTML = sim.journal.slice(0, 12).map((e) =>
-          `<div class="journal-row"><b>Д${e.day}</b>${e.text}</div>`
+        journal.innerHTML = all.map((e) =>
+          `<div class="journal-row ${e.kind}"><b>Д${e.day}</b>${e.text}</div>`
         ).join('');
       }
+    // people list: who is doing what right now
+    const people = document.getElementById('people-list');
+    if (people && this.world) {
+      people.innerHTML = this.world.villagers.map((v) => {
+        const status = villagerStatus(v);
+        const rel = this.world.relation(0, v.id);
+        const badge = rel.value > 25 ? '<span class="badge">друг</span>'
+          : rel.value < -25 ? '<span class="badge">недруг</span>' : '';
+        return `<div class="person-row"><b>${v.name}</b><em>${status}</em>${badge}</div>`;
+      }).join('');
+    }
+  }
+
+  // world status panel
+    const wDay = document.getElementById('world-day');
+    if (wDay) wDay.textContent = this.world?.day ?? 1;
+    const wWx = document.getElementById('world-weather');
+    if (wWx) {
+      wWx.textContent = { clear: 'ясно', rain: 'дождь', fog: 'туман' }[this.world?.weather?.kind] ?? 'ясно';
+    }
+    const wPeople = document.getElementById('world-people');
+    if (wPeople) wPeople.textContent = this.world?.villagers?.length ?? 0;
+    // how many villagers the player is on good terms with
+    const wFriends = document.getElementById('world-friends');
+    if (wFriends && this.world) {
+      let n = 0;
+      for (const [k, r] of this.world.relationships) {
+        if (r.value > 25 && (k.startsWith('0|') || k.endsWith('|0'))) n++;
+      }
+      wFriends.textContent = n;
+    }
+    const fest = this.world?.festival;
+    const festRow = document.getElementById('world-festival-row');
+    const festEl = document.getElementById('world-festival');
+    if (festRow && festEl) {
+      festRow.style.display = fest ? '' : 'none';
+      if (fest) festEl.textContent = fest.name;
     }
   }
 
@@ -1389,6 +1479,19 @@ async function boot() {
     questPanel.classList.add('hidden');
   });
 
+  // start the village from scratch
+  document.getElementById('btn-reset')?.addEventListener('click', () => {
+    clearWorld();
+    village.onToast?.('Деревня началась заново. Перезагрузите страницу.');
+    setTimeout(() => window.location.reload(), 900);
+  });
+
+  // the list of villagers
+  const peoplePanel = document.getElementById('people-panel');
+  document.getElementById('btn-people')?.addEventListener('click', () => {
+    peoplePanel.classList.toggle('hidden');
+  });
+
   // shop window
   const shopEl = document.getElementById('shop');
   document.getElementById('shop-close')?.addEventListener('click', () => village.closeShop());
@@ -1424,6 +1527,21 @@ async function boot() {
       });
       box.appendChild(btn);
     }
+  }
+
+  // ---- the return report: what happened while the game was closed ----
+  const returnCard = document.getElementById('return-card');
+  document.getElementById('return-close')?.addEventListener('click', () => {
+    returnCard.classList.add('hidden');
+  });
+  const summary = village.worldBridge.catchUpSummary;
+  if (summary && summary.ticks > 0) {
+    const lines = village.worldBridge.offlineReport();
+    document.getElementById('return-title').textContent = 'Пока вас не было';
+    document.getElementById('return-body').innerHTML = lines
+      .map((l) => `<div>${l}</div>`)
+      .join('');
+    returnCard.classList.remove('hidden');
   }
 
   village.refreshHud();

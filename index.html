@@ -70,7 +70,9 @@
         <button id="btn-sound">Звук</button>
         <button id="btn-photo">Снимок</button>
         <button id="btn-quests">Задания</button>
-        <button id="btn-journal">Дневник</button>
+        <button id="btn-journal">Хроника</button>
+        <button id="btn-people">Жители</button>
+        <button id="btn-reset" title="Начать мир заново">Заново</button>
       </div>
     </div>
 
@@ -93,8 +95,29 @@
     </div>
 
     <div class="panel panel-journal hidden" id="journal-panel">
-      <div class="needs-title">Дневник</div>
+      <div class="needs-title">Хроника деревни</div>
       <div id="journal-list"></div>
+    </div>
+
+    <div class="panel panel-people hidden" id="people-panel">
+      <div class="needs-title">Жители</div>
+      <div id="people-list"></div>
+    </div>
+
+    <div class="panel panel-world" id="world-panel">
+      <div class="world-row"><span>День</span><b id="world-day">1</b></div>
+      <div class="world-row"><span>Погода</span><b id="world-weather">ясно</b></div>
+      <div class="world-row"><span>Жителей</span><b id="world-people">12</b></div>
+      <div class="world-row"><span>Друзей</span><b id="world-friends">0</b></div>
+      <div class="world-row" id="world-festival-row" style="display:none"><span>Событие</span><b id="world-festival"></b></div>
+    </div>
+
+    <div class="return-card hidden" id="return-card">
+      <div class="return-inner">
+        <h3 id="return-title">Пока вас не было</h3>
+        <div id="return-body"></div>
+        <button id="return-close">Продолжить</button>
+      </div>
     </div>
 
     <div class="shop hidden" id="shop">
