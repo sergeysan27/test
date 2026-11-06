@@ -7,8 +7,9 @@ import { WORLD, PALETTE, phaseForTime } from './config.js';
 import { makeRng, clamp, lerp, damp } from './util.js';
 import { buildGround, buildLayout, terrainHeight, isOnRoad, PLACES } from './world.js';
 import { buildHouse, buildTree, buildTreeInstances, buildLamp, buildProp, buildFireflies, createMaterialCache } from './props.js';
-import { createNpcs, updateNpcs, dampAngle, npcLine } from './npcs.js';
+import { dampAngle, npcLine } from './npcs.js';
 import { villagerLine, villagerStatus } from './dialogue.js';
+import { SleepSequence } from './sleep.js';
 import { WorldBridge } from './world-bridge.js';
 import { loadWorld, saveWorld, clearWorld } from './world-sim.js';
 import { SkySystem, WeatherSystem, FireflySystem } from './systems.js';
@@ -232,6 +233,16 @@ class Village {
     this.shopOpen = null;
     this.nearbyPlace = null;
     this.hudTimer = 0;
+    // the sequence that walks the character in to bed
+    this.sleepSeq = new SleepSequence(this);
+    this.sleepSeq.onToast = (t) => this.onToast?.(t);
+    this.sleepSeq.onFinished = () => {
+      // the night passes and a new day begins
+      const sim = this.sim;
+      sim.startNewDay();
+      this.setTime(6.4);
+      this.onToast?.(`День ${sim.day}. Утро. Всё как было, только светлее.`);
+    };
     this.setupRenderer();
     this.buildScene();
     this.bindEvents();
@@ -875,18 +886,25 @@ class Village {
     this.checkQuests();
   }
 
-  // Sleeping at a house ends the day: the village wakes up again at dawn.
+  // Sleeping at a house ends the day: the character walks to the door, goes
+  // inside and the village wakes up again at dawn.
   sleep(place) {
     const sim = this.sim;
     if (this.hours > 4 && this.hours < 20) {
       this.onToast?.('Спать сейчас не хочется. Дождись ночи.');
       return;
     }
-    sim.startNewDay();
-    this.setTime(6.4);
-    this.player.pos.set(place.house.x + Math.sin(place.house.rot) * (place.house.d / 2 + 1.2), 0, place.house.z + Math.cos(place.house.rot) * (place.house.d / 2 + 1.2));
-    this.player.pos.y = terrainHeight(this.player.pos.x, this.player.pos.z);
-    this.onToast?.(`День ${sim.day}. Утро. Всё как было, только светлее.`);
+    // find the house and its door
+    const house = this.houses.find((h) => h.userData.spec === place.house)
+      || this.houses[place.house?.index];
+    const doorPivot = house?.userData?.doorPivot;
+    const started = this.sleepSeq.start(place, doorPivot);
+    if (!started) {
+      this.onToast?.('Не получается уснуть.');
+      return;
+    }
+    this.sleepSeq.doorAngle = house?.userData?.doorAngle ?? 0;
+    this.onToast?.('Заходишь в дом.');
   }
 
   // Eat the best food in the bag: Q.
@@ -940,8 +958,13 @@ class Village {
   }
 
   togglePlayerLamp() {
+    const dusk = clamp(1 - (smoothstepLocal(5.4, 8.0, this.hours) * (1 - smoothstepLocal(17.6, 20.2, this.hours))), 0, 1);
+    if (dusk < 0.3) {
+      this.onToast?.('Сейчас и так светло — фонарь не нужен.');
+      return;
+    }
     this.playerLampOn = this.playerLampOn === undefined ? false : !this.playerLampOn;
-    this.onToast?.(this.playerLampOn ? 'Фонарь включён' : 'Фонарь выключен');
+    this.onToast?.(this.playerLampOn ? 'Фонарь включён' : 'Фонарь убран');
   }
 
   onResize() {
@@ -954,6 +977,16 @@ class Village {
 
   updatePlayer(dt) {
     const p = this.player;
+    // while the character is walking in to bed the sequence drives them
+    if (this.sleepSeq?.active) {
+      p.vel.x = 0;
+      p.vel.z = 0;
+      p.body.position.set(p.pos.x, p.pos.y, p.pos.z);
+      p.shadow.position.set(p.pos.x, p.pos.y + 0.04, p.pos.z);
+      p.shadow.updateMatrix();
+      this.updateCamera(dt);
+      return;
+    }
     const speed = (this.keys.ShiftLeft || this.keys.ShiftRight) ? 6.2 : 3.1;
     let mx = 0, mz = 0;
     if (this.keys.KeyW) mz += 1;
@@ -1026,6 +1059,11 @@ class Village {
     p.shadow.updateMatrix();
 
     // camera: over-the-shoulder third person
+    this.updateCamera(dt);
+  }
+
+  updateCamera(dt) {
+    const p = this.player;
     const dist = this.cameraDist ?? 6.5;
     const focus = new THREE.Vector3(p.pos.x, p.pos.y + 1.5, p.pos.z);
     const offset = new THREE.Vector3(
@@ -1050,24 +1088,35 @@ class Village {
     }
     this.camera.position.lerp(camTarget, 1 - Math.exp(-14 * dt));
     this.camera.lookAt(focus);
-
-    if (this.playerLamp) {
-      this.playerLamp.position.set(p.pos.x + Math.sin(p.yaw) * 0.4, p.pos.y + 1.3, p.pos.z + Math.cos(p.yaw) * 0.4);
-      this.playerLamp.intensity = damp(this.playerLamp.intensity, this.playerLampOn ? 2.6 : 0, 6, dt);
-    }
   }
   updatePlayerLantern(dt) {
     const p = this.player;
-    const night = clamp(1 - (smoothstepLocal(5.4, 8.0, this.hours) * (1 - smoothstepLocal(17.6, 20.2, this.hours))), 0, 1);
+    // The lantern belongs to the evening: it fades in as the light goes and
+    // is put away again in the morning.
+    const dusk = clamp(1 - (smoothstepLocal(5.4, 8.0, this.hours) * (1 - smoothstepLocal(17.6, 20.2, this.hours))), 0, 1);
+    // a little earlier than full dark, so it comes on with the first lamps
+    const evening = clamp((dusk - 0.18) / 0.5, 0, 1);
     const on = this.playerLampOn === undefined ? true : this.playerLampOn;
-    const target = on ? night : 0;
+    const target = on ? evening : 0;
     const e = p.lanternEmitter;
     const cur = e.intensity;
     const next = damp(cur, target * 2.4, 4, dt);
     e.intensity = next;
+
     // the emitter follows the lantern in world space
     p.lantern.getWorldPosition(e.position);
     e.position.y += 0.1;
+
+    // the lantern itself disappears in daylight - it is put away on the
+    // doorstep and taken out again when the evening comes
+    const visible = next > 0.02;
+    p.lantern.visible = visible;
+    if (!visible) {
+      p.lanternGlow.material.opacity = 0;
+      p.lanternGlow.visible = false;
+      return;
+    }
+
     p.lanternGlass.material.emissiveIntensity = 0.3 + (next / 2.4) * 1.6;
     p.lanternGlow.material.opacity = (next / 2.4) * 0.5;
     p.lanternGlow.visible = p.lanternGlow.material.opacity > 0.015;
@@ -1260,7 +1309,11 @@ class Village {
 
   animate = () => {
     requestAnimationFrame(this.animate);
-    const dt = Math.min(this.clock.getDelta(), 0.05);
+    const raw = this.clock.getDelta();
+    // The simulation step is clamped so a long stall cannot teleport the
+    // player through a wall. The world clock must not use that clamped
+    // value: on a slow machine the village would run in slow motion.
+    const dt = Math.min(raw, 0.05);
     this.time += dt;
 
     // the village keeps its own rhythm: the world clock advances on its own
@@ -1271,6 +1324,11 @@ class Village {
       const slider = document.getElementById('time-slider');
       if (slider) slider.value = this.hours;
     }
+
+    // the walk to bed takes over the player
+    this.sleepSeq.update(dt);
+    const fadeEl = document.getElementById('fade');
+    if (fadeEl) fadeEl.style.opacity = this.sleepSeq.fade;
 
     this.updatePlayer(dt);
     // The world runs on its own clock, independent of the frame rate.

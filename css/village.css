@@ -438,6 +438,17 @@ html, body {
 }
 .toast.hidden { opacity: 0; transform: translate(-50%, -10px); }
 
+/* Night fade: the screen goes dark when the character goes to bed */
+.fade {
+  position: absolute;
+  inset: 0;
+  background: #06040a;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s linear;
+  z-index: 25;
+}
+
 /* Needs + inventory */
 .panel-needs {
   left: 22px;

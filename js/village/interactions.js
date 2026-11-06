@@ -92,7 +92,7 @@ export function buildInteractables(layout, extra = []) {
     list.push({
       id: `home-${h.index}`,
       label: 'Войти в дом и поспать',
-      radius: 2.6,
+      radius: 3.6,
       icon: '🏠',
       position: new THREE.Vector3(h.x + dx, 0, h.z + dz),
       house: h,

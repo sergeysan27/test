@@ -17,9 +17,13 @@ import { clamp, lerp } from './util.js';
 // serialised to JSON and stored, and so it can run headlessly.
 // ---------------------------------------------------------------------------
 
-export const TICK = 0.25;           // seconds of real time per world tick
-export const HOURS_PER_TICK = 0.05; // in-game hours that pass per tick
-export const MAX_CATCHUP_TICKS = 20000;
+// The world is stepped on a fixed tick. The tick has to be short enough
+// that the villagers move smoothly - a tenth of a second is enough for
+// the movement to look continuous, while the decisions themselves are
+// still made far more rarely (see planTicks in the world).
+export const TICK = 0.1;            // seconds of real time per world tick
+export const HOURS_PER_TICK = 0.02; // in-game hours that pass per tick
+export const MAX_CATCHUP_TICKS = 60000;
 
 // How much world time passes for one second of real time while the player
 // is watching: 0.05 h per tick / 0.25 s per tick = 0.2 h per second, so one
@@ -96,6 +100,8 @@ export class World {
     this.time = options.time ?? 19.6 * 60; // absolute in-game minutes
     this.day = options.day ?? 1;
     this.tickCount = 0;
+    // when the last tick happened, so the renderer can interpolate
+    this.lastTickAt = Date.now();
 
     this.villagers = [];
     this.relationships = new Map();   // "a|b" -> { value, meetings }
@@ -158,7 +164,9 @@ export class World {
       targetZ: 0,
       x: 0,
       z: 0,
-      speed: this.range(0.7, 1.15),
+      // walking speed in units per second - a little slower than the
+      // player, so the villagers look like they are going about their day
+      speed: this.range(1.4, 2.0),
       // each villager has its own favourite haunts
       socialSpot: this.pick(['plaza', 'plaza', 'bonfire', 'bench', 'church', 'orchard']),
       eatSpot: this.pick(['bakery', 'plaza', 'bakery', 'well']),
@@ -261,6 +269,13 @@ export class World {
   // world changes; the renderer just observes the result.
   step() {
     this.tickCount++;
+    this.lastTickAt = Date.now();
+    // Remember where everybody was before this tick, so the renderer can
+    // draw them smoothly in between two ticks instead of jumping.
+    for (const v of this.villagers) {
+      v.prevX = v.x;
+      v.prevZ = v.z;
+    }
     this.time += HOURS_PER_TICK * 60;
     const prevDay = this.day;
     if (this.time >= 24 * 60) {
@@ -426,11 +441,11 @@ export class World {
   updateVillagers() {
     for (const v of this.villagers) {
       // needs drift
-      v.hunger = clamp(v.hunger - 0.055 - (this.isNight ? 0 : 0.012), 0, 100);
-      v.energy = clamp(v.energy - (v.activity === 'sleep' ? -0.55 : 0.075), 0, 100);
-      v.social = clamp(v.social - 0.06, 0, 100);
-      v.fun = clamp(v.fun - 0.05, 0, 100);
-      v.hygiene = clamp(v.hygiene - 0.05, 0, 100);
+      v.hunger = clamp(v.hunger - 0.022 - (this.isNight ? 0 : 0.005), 0, 100);
+      v.energy = clamp(v.energy - (v.activity === 'sleep' ? -0.22 : 0.03), 0, 100);
+      v.social = clamp(v.social - 0.024, 0, 100);
+      v.fun = clamp(v.fun - 0.02, 0, 100);
+      v.hygiene = clamp(v.hygiene - 0.02, 0, 100);
 
       // decide, but not every tick: a villager keeps their plan for a while
       // so they look purposeful instead of dithering
@@ -448,7 +463,7 @@ export class World {
           v.visits[spot.id] = (v.visits[spot.id] || 0) + 1;
         }
         // a plan lasts a while; short plans for urgent needs
-        v.planTicks = act === 'eat' || act === 'wash' ? 10 : this.int(24, 70);
+        v.planTicks = act === 'eat' || act === 'wash' ? 40 : this.int(120, 350);
       }
 
       // walk towards the target
@@ -457,7 +472,8 @@ export class World {
       const dist = Math.hypot(dx, dz);
       const moving = v.activity !== 'sleep';
       if (dist > 0.6 && moving) {
-        const step = Math.min(dist, v.speed * 0.55);
+        // v.speed is in units per second; the tick is 0.1 s
+        const step = Math.min(dist, v.speed * 0.1);
         v.x += (dx / dist) * step;
         v.z += (dz / dist) * step;
         v.moving = true;
@@ -475,7 +491,7 @@ export class World {
         case 'eat':
           v.emote = 'eat';
           // eating takes a little while and actually fills them up
-          if (this.chance(0.06)) {
+          if (this.chance(0.015)) {
             v.hunger = clamp(v.hunger + 14, 0, 100);
             v.fun = clamp(v.fun + 2, 0, 100);
             if (this.stock.bread > 0) {
@@ -542,7 +558,7 @@ export class World {
       // a villager who spots the player walks over to them
       if (this.playerPos) {
         const dp = Math.hypot(this.playerPos.x - v.x, this.playerPos.z - v.z);
-        if (dp < 9 && v.traitData.social > 0.55 && this.chance(0.06) && v.activity !== 'sleep') {
+        if (dp < 9 && v.traitData.social > 0.55 && this.chance(0.015) && v.activity !== 'sleep') {
           v.activity = 'greet';
           v.targetSpot = 'player';
           const a = this.rand() * Math.PI * 2;
@@ -563,11 +579,11 @@ export class World {
         if (d < bestD) { bestD = d; best = o; }
       }
       if (!best) continue;
-      if (!this.chance(0.25 + v.traitData.social * 0.4)) continue;
+      if (!this.chance(0.06 + v.traitData.social * 0.1)) continue;
 
       v.talkTo = best.id;
       best.talkTo = v.id;
-      v.talkTimer = 6 + this.int(0, 6);
+      v.talkTimer = 15 + this.int(0, 15);
       best.talkTimer = v.talkTimer;
 
       const rel = this.relation(v.id, best.id);
@@ -603,7 +619,7 @@ export class World {
   // A tiny economy: villagers buy bread and apples from the market, and the
   // bakery produces more bread over time.
   updateEconomy() {
-    if (this.tickCount % 8 !== 0) return;
+    if (this.tickCount % 20 !== 0) return;
     if (this.weather.kind === 'rain') {
       this.stock.bread = Math.max(0, this.stock.bread - 1);
     } else {
@@ -641,7 +657,8 @@ export class World {
         workSpot: v.workSpot, homeSpot: v.homeSpot,
         hunger: v.hunger, energy: v.energy, social: v.social, fun: v.fun, hygiene: v.hygiene,
         activity: v.activity, targetSpot: v.targetSpot, targetX: v.targetX, targetZ: v.targetZ,
-        x: v.x, z: v.z, speed: v.speed, talkTo: v.talkTo, talkTimer: v.talkTimer,
+        x: v.x, z: v.z, prevX: v.prevX ?? v.x, prevZ: v.prevZ ?? v.z,
+        speed: v.speed, talkTo: v.talkTo, talkTimer: v.talkTimer,
         mood: v.mood, lastEvent: v.lastEvent, visits: v.visits,
         socialSpot: v.socialSpot, eatSpot: v.eatSpot, playSpot: v.playSpot,
         choreSpot: v.choreSpot, restSpot: v.restSpot, marketSpot: v.marketSpot,

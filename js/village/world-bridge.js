@@ -126,30 +126,95 @@ export class WorldBridge {
   update(dt, hours) {
     // let the world know where the player is, so villagers can react
     if (this.playerPos) this.world.playerPos = this.playerPos;
-    this.syncActors(dt);
+    // The real time since the last frame. The render loop clamps its delta
+    // so a stall cannot teleport the player, but the villagers have to keep
+    // up with the wall clock or they drift behind the simulation.
+    const now = performance.now();
+    if (this._lastFrameAt === undefined) this._lastFrameAt = now;
+    const realDt = Math.min((now - this._lastFrameAt) / 1000, 0.25);
+    this._lastFrameAt = now;
+    this.syncActors(realDt);
   }
 
-  // Copies the simulated state onto the visible meshes.
+  // The world is stepped on its own timer, four times a second. If the
+  // meshes simply copied the simulated position, every villager would jump
+  // four times a second - which reads as a character moving at five frames
+  // per second next to the player, who moves smoothly.
+  //
+  // So the bridge remembers where each villager was before the last tick
+  // and eases the visible mesh from there to the new position. The walk
+  // animation runs on the render clock as well, at the same speed as the
+  // player's.
   syncActors(dt) {
     for (const v of this.world.villagers) {
       const obj = this.actors.get(v.id);
       if (!obj) continue;
-      const y = terrainHeightSafe(this.terrainHeight, v.x, v.z);
-      obj.position.x = v.x;
-      obj.position.z = v.z;
+
+      // How the villagers move.
+      //
+      // The world is stepped ten times a second, so the simulated position
+      // jumps. The visible mesh must not: it is moved by the same amount
+      // the simulation moved, but spread over the frames in between and
+      // capped at the villager's own walking speed. That is what makes them
+      // move at the same rate as the player instead of hopping.
+      if (v.visX === undefined) {
+        v.visX = v.x;
+        v.visZ = v.z;
+        v.simX = v.x;
+        v.simZ = v.z;
+      }
+      // How far the simulation has come since the last frame
+      const simDX = v.x - v.simX;
+      const simDZ = v.z - v.simZ;
+      v.simX = v.x;
+      v.simZ = v.z;
+
+      // The mesh walks towards the simulated position at the villager's own
+      // speed. The world is stepped ten times a second, so the goal arrives
+      // in small steps; the mesh follows it smoothly instead of copying it.
+      // If the frame rate is low and the mesh falls behind, it catches up
+      // a little faster, so the villagers never lag behind the simulation.
+      const dx = v.x - v.visX;
+      const dz = v.z - v.visZ;
+      const dist = Math.hypot(dx, dz);
+      const speed = v.speed ?? 1.2;
+      // if the mesh has fallen a long way behind - the villager changed
+      // their mind, or the frame rate dropped - they hurry to catch up
+      const catchUp = dist > 1.5 ? 2.6 : 1.0;
+      const maxStep = speed * dt * catchUp;
+      let tx = v.visX;
+      let tz = v.visZ;
+      if (dist > 0.0001) {
+        const step = Math.min(dist, maxStep);
+        tx += (dx / dist) * step;
+        tz += (dz / dist) * step;
+      }
+      const movedNow = Math.hypot(tx - v.visX, tz - v.visZ);
+      v.visX = tx;
+      v.visZ = tz;
+
+      const y = terrainHeightSafe(this.terrainHeight, tx, tz);
+      obj.position.x = tx;
+      obj.position.z = tz;
       obj.position.y = y;
+
+      const walking = movedNow > 0.002;
 
       // face the way they walk, or turn towards whoever they talk to
       let facing = v.facing ?? 0;
       if (v.talkTo !== null && v.talkTo !== undefined) {
         const other = this.world.villagers.find((o) => o.id === v.talkTo);
-        if (other) facing = Math.atan2(other.x - v.x, other.z - v.z);
+        if (other) facing = Math.atan2(other.x - tx, other.z - tz);
       }
       obj.rotation.y = approachAngle(obj.rotation.y, facing, dt * 6);
 
+      // the walk cycle is driven by the distance the mesh actually
+      // covered, so the feet never slide
+      v.stride = (v.stride ?? 0) + movedNow * 3.4;
+
       const parts = obj.userData.parts;
-      const phase = this.world.tickCount * 0.4 + v.id;
-      const w = Math.sin(phase * 7) * (v.moving ? 1 : 0);
+      const phase = v.stride + v.id * 1.7;
+      const w = Math.sin(phase) * (walking ? 1 : 0);
       if (parts?.legL) {
         parts.legL.rotation.x = w * 0.55;
         parts.legR.rotation.x = -w * 0.55;

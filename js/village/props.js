@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { PALETTE } from './config.js';
-import { plasterTexture, roofTexture, woodTexture, leafTexture, windowTexture, glowSprite, starTexture } from './textures.js';
+import { plasterTexture, roofTexture, woodTexture, leafTexture, windowTexture, glowSprite, starTexture, stoneTexture } from './textures.js';
 import { buildSmoke } from './smoke.js';
 import { buildRoof, buildInterior } from './interior.js';
 import { buildWallWithHoles } from './walls.js';
@@ -43,6 +43,45 @@ function addBox(parent, matl, w, h, d, x, y, z, rotY = 0) {
   return m;
 }
 
+// A box whose texture tiles by its real size instead of being stretched over
+// the whole face. A wide stone base built from a unit cube would show one
+// stretched texture, which reads as strange dark bands.
+const tiledBoxCache = new Map();
+function tiledBox(w, h, d, texelsPerUnit = 1) {
+  const key = `${w.toFixed(3)}_${h.toFixed(3)}_${d.toFixed(3)}_${texelsPerUnit}`;
+  let geo = tiledBoxCache.get(key);
+  if (geo) return geo;
+  geo = new THREE.BoxGeometry(w, h, d);
+  // BoxGeometry face order: +x, -x, +y, -y, +z, -z - four verts each
+  const uv = geo.attributes.uv;
+  const faces = [
+    [d, h], [d, h],   // +x, -x
+    [w, d], [w, d],   // +y, -y
+    [w, h], [w, h],   // +z, -z
+  ];
+  for (let f = 0; f < 6; f++) {
+    const [fw, fh] = faces[f];
+    for (let i = 0; i < 4; i++) {
+      const idx = f * 4 + i;
+      uv.setXY(idx, uv.getX(idx) * fw * texelsPerUnit, uv.getY(idx) * fh * texelsPerUnit);
+    }
+  }
+  uv.needsUpdate = true;
+  tiledBoxCache.set(key, geo);
+  return geo;
+}
+
+// A stone block with the texture tiled to its size.
+function addStone(parent, matl, w, h, d, x, y, z, rotY = 0) {
+  const m = new THREE.Mesh(tiledBox(w, h, d, 0.6), matl);
+  m.position.set(x, y, z);
+  m.rotation.y = rotY;
+  m.castShadow = true;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+
 export function buildHouse(spec, cache) {
   const group = new THREE.Group();
   const { w, d, h, roofH } = spec;
@@ -58,6 +97,15 @@ export function buildHouse(spec, cache) {
   const dw = 0.95, dh = 1.9;
   const winW = 0.86, winH = 0.98;
   const winY = h * 0.56;
+  // The stone plinth the walls stand on. The walls start on top of it, so
+  // the stone reads as a proper foundation instead of a stripe at the
+  // bottom of the wall.
+  const plinth = 0.55;
+  // everything that belongs to the house proper is lifted onto the plinth,
+  // so the openings, the door and the windows all line up with the walls
+  const shell = new THREE.Group();
+  shell.position.y = plinth;
+  group.add(shell);
 
   // front wall (along X, at +Z): door in the middle, windows beside it
   const frontHoles = [{ x: 0, y: dh / 2, w: dw, h: dh }];
@@ -69,7 +117,7 @@ export function buildHouse(spec, cache) {
   }
   const front = buildWallWithHoles(w, h, 0.18, frontHoles, wallMat);
   front.position.set(0, 0, d / 2);
-  group.add(front);
+  shell.add(front);
 
   // back wall: one or two windows
   const backHoles = [];
@@ -80,7 +128,7 @@ export function buildHouse(spec, cache) {
   }
   const back = buildWallWithHoles(w, h, 0.18, backHoles, wallMat);
   back.position.set(0, 0, -d / 2);
-  group.add(back);
+  shell.add(back);
 
   // side walls (along Z): one window each
   const sideHoles = [{ x: 0, y: winY, w: winW, h: winH }];
@@ -88,42 +136,51 @@ export function buildHouse(spec, cache) {
     const side = buildWallWithHoles(d, h, 0.18, sideHoles, wallMat);
     side.position.set(s * w / 2, 0, 0);
     side.rotation.y = Math.PI / 2;
-    group.add(side);
+    shell.add(side);
   }
 
-  // stone base
-  addBox(group, cache.getStone(), w + 0.18, 0.45, d + 0.18, 0, 0.22, 0);
+  // The stone plinth: a course of masonry the house stands on.
+  addStone(group, cache.getStone(), w + 0.3, plinth, d + 0.3, 0, plinth / 2, 0);
+  // a slightly wider step at the bottom so it reads as a foundation
+  addStone(group, cache.getStone(), w + 0.55, 0.18, d + 0.55, 0, 0.09, 0);
 
   // solid roof with a closed attic void (no peeking inside)
   const roofGroup = buildRoof(spec, roofMat, wallMat);
-  group.add(roofGroup);
+  shell.add(roofGroup);
 
   // interior furnishings
   const interior = buildInterior(spec, cache);
   interior.isInterior = true;
-  group.add(interior);
+  shell.add(interior);
 
-  // door leaf, swung open against the wall
-  const door = addBox(group, doorMat, dw, dh, 0.09, 0, dh / 2, d / 2 + 0.06);
+  // The door leaf. It hangs closed and is opened by the character when they
+  // come in to sleep, so it is kept as its own pivot with the hinge on one
+  // side.
+  const doorPivot = new THREE.Group();
+  doorPivot.position.set(-dw / 2, 0, d / 2 + 0.06);
+  const door = addBox(doorPivot, doorMat, dw, dh, 0.09, dw / 2, dh / 2, 0);
   door.castShadow = false;
-  door.rotation.y = -0.85;
-  door.position.set(-dw / 2 + 0.1, dh / 2, d / 2 + 0.12);
+  door.userData.door = true;
+  door.userData.dynamic = true;
+  shell.add(doorPivot);
+  group.userData.doorPivot = doorPivot;
+  group.userData.doorAngle = 0;
   // door frame
-  addBox(group, trimMat, dw + 0.22, 0.14, 0.2, 0, dh + 0.05, d / 2 + 0.02);
-  addBox(group, trimMat, 0.12, dh + 0.05, 0.2, -dw / 2 - 0.06, (dh + 0.05) / 2, d / 2 + 0.02);
-  addBox(group, trimMat, 0.12, dh + 0.05, 0.2, dw / 2 + 0.06, (dh + 0.05) / 2, d / 2 + 0.02);
+  addBox(shell, trimMat, dw + 0.22, 0.14, 0.2, 0, dh + 0.05, d / 2 + 0.02);
+  addBox(shell, trimMat, 0.12, dh + 0.05, 0.2, -dw / 2 - 0.06, (dh + 0.05) / 2, d / 2 + 0.02);
+  addBox(shell, trimMat, 0.12, dh + 0.05, 0.2, dw / 2 + 0.06, (dh + 0.05) / 2, d / 2 + 0.02);
   // handle
   const knob = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), mat(0xc9a44a, { metalness: 0.7, roughness: 0.3 }));
-  knob.position.set(-dw / 2 + 0.24, dh * 0.5, d / 2 + 0.2);
-  group.add(knob);
+  knob.position.set(dw * 0.3, dh * 0.5, d / 2 + 0.12);
+  shell.add(knob);
 
   // porch
   if (spec.porch) {
-    addBox(group, cache.getWood(spec.trim), dw + 0.9, 0.16, 1.1, 0, 0.08, d / 2 + 0.6);
+    addBox(shell, cache.getWood(spec.trim), dw + 0.9, 0.16, 1.1, 0, 0.08, d / 2 + 0.6);
     for (const s of [-1, 1]) {
-      addBox(group, trimMat, 0.12, 2.3, 0.12, s * (dw / 2 + 0.35), 1.15, d / 2 + 1.05);
+      addBox(shell, trimMat, 0.12, 2.3, 0.12, s * (dw / 2 + 0.35), 1.15, d / 2 + 1.05);
     }
-    const awning = addBox(group, cache.getRoof(spec.roof), dw + 1.0, 0.1, 1.25, 0, 2.4, d / 2 + 0.55);
+    const awning = addBox(shell, cache.getRoof(spec.roof), dw + 1.0, 0.1, 1.25, 0, 2.4, d / 2 + 0.55);
     awning.rotation.x = -0.16;
   }
 
@@ -157,7 +214,7 @@ export function buildHouse(spec, cache) {
       [0.09, winH, winW / 2 + 0.045, 0],         // right
     ];
     for (const [fw, fh, fx, fy] of frameParts) {
-      const part = addBox(group, trimMat, fw, fh, 0.12, p.x + fx, p.y + fy, p.z, p.rot);
+      const part = addBox(shell, trimMat, fw, fh, 0.12, p.x + fx, p.y + fy, p.z, p.rot);
       part.position.x += Math.sin(p.rot) * 0.02;
       part.position.z += Math.cos(p.rot) * 0.02;
     }
@@ -167,17 +224,17 @@ export function buildHouse(spec, cache) {
     pane.position.set(p.x, p.y, p.z);
     pane.rotation.y = p.rot;
     pane.userData.dynamic = true;
-    group.add(pane);
+    shell.add(pane);
     winFrames.push({ pane, side: p.side });
     // mullions
-    const bar = addBox(group, trimMat, 0.05, winH, 0.06, p.x, p.y, p.z, p.rot);
+    const bar = addBox(shell, trimMat, 0.05, winH, 0.06, p.x, p.y, p.z, p.rot);
     bar.position.x += Math.sin(p.rot) * 0.03;
     bar.position.z += Math.cos(p.rot) * 0.03;
     // shutters, folded open against the wall next to the window
     if (rngBool(spec.index * 3 + positions.indexOf(p) * 7)) {
       const sh = mat(PALETTE.wood[0], { roughness: 0.8 });
       for (const s of [-1, 1]) {
-        const shutter = addBox(group, sh, 0.3, winH + 0.08, 0.05,
+        const shutter = addBox(shell, sh, 0.3, winH + 0.08, 0.05,
           p.x + (p.rot === 0 ? s * (winW / 2 + 0.2) : 0), p.y,
           p.z + (p.rot === 0 ? 0 : s * (winW / 2 + 0.2)), p.rot);
         shutter.position.x += Math.sin(p.rot) * 0.09;
@@ -186,7 +243,7 @@ export function buildHouse(spec, cache) {
     }
     // flower box
     if (spec.flowerBox && rngBool(spec.index * 7 + 3)) {
-      const box = addBox(group, cache.getWood(spec.trim), winW + 0.1, 0.2, 0.24, p.x, p.y - winH / 2 - 0.14, p.z, p.rot);
+      const box = addBox(shell, cache.getWood(spec.trim), winW + 0.1, 0.2, 0.24, p.x, p.y - winH / 2 - 0.14, p.z, p.rot);
       box.position.x += Math.sin(p.rot) * 0.16;
       box.position.z += Math.cos(p.rot) * 0.16;
       for (let f = 0; f < 5; f++) {
@@ -197,7 +254,7 @@ export function buildHouse(spec, cache) {
           p.y - winH / 2 - 0.02 + Math.random() * 0.1,
           p.z + Math.cos(p.rot) * 0.16 + (p.rot === 0 ? 0 : t2)
         );
-        group.add(fl);
+        shell.add(fl);
       }
     }
   }
@@ -206,36 +263,36 @@ export function buildHouse(spec, cache) {
   if (spec.attic) {
     const round = new THREE.Mesh(new THREE.CircleGeometry(0.32, 16), winMat);
     round.position.set(0, h + roofH * 0.42, d / 2 + 0.3);
-    group.add(round);
+    shell.add(round);
     const rim = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.05, 6, 16), trimMat);
     rim.position.set(0, h + roofH * 0.42, d / 2 + 0.3);
-    group.add(rim);
+    shell.add(rim);
   }
 
   // chimney
   if (spec.chimney) {
-    const ch = addBox(group, cache.getStone(), 0.7, 1.6, 0.7, w * 0.28, h + roofH * 0.55, -d * 0.2);
+    const ch = addStone(shell, cache.getStone(), 0.7, 1.6, 0.7, w * 0.28, h + roofH * 0.55, -d * 0.2);
     ch.rotation.y = 0.2;
-    addBox(group, cache.getStone(), 0.85, 0.16, 0.85, w * 0.28, h + roofH * 0.55 + 0.8, -d * 0.2);
+    addStone(shell, cache.getStone(), 0.85, 0.16, 0.85, w * 0.28, h + roofH * 0.55 + 0.8, -d * 0.2);
     // chimney smoke
     const smoke = buildSmoke(w * 0.28, h + roofH * 0.55 + 0.95, -d * 0.2);
-    group.add(smoke);
+    shell.add(smoke);
     group.userData.smoke = smoke;
   }
 
   // balcony
   if (spec.balcony) {
     const by = h * 0.62;
-    addBox(group, trimMat, w * 0.7, 0.12, 0.9, 0, by, d / 2 + 0.45);
+    addBox(shell, trimMat, w * 0.7, 0.12, 0.9, 0, by, d / 2 + 0.45);
     for (let i = 0; i <= 6; i++) {
-      addBox(group, trimMat, 0.07, 0.6, 0.07, -w * 0.35 + (i / 6) * w * 0.7, by + 0.36, d / 2 + 0.85);
+      addBox(shell, trimMat, 0.07, 0.6, 0.07, -w * 0.35 + (i / 6) * w * 0.7, by + 0.36, d / 2 + 0.85);
     }
-    addBox(group, trimMat, w * 0.72, 0.08, 0.1, 0, by + 0.66, d / 2 + 0.85);
+    addBox(shell, trimMat, w * 0.72, 0.08, 0.1, 0, by + 0.66, d / 2 + 0.85);
   }
 
   // sign
   if (spec.sign) {
-    const board = addBox(group, cache.getWood(spec.trim), 1.1, 0.42, 0.07, w * 0.5 + 0.5, h * 0.8, 0);
+    const board = addBox(shell, cache.getWood(spec.trim), 1.1, 0.42, 0.07, w * 0.5 + 0.5, h * 0.8, 0);
     const s = board;
     s.rotation.z = 0.05;
   }
@@ -1311,7 +1368,7 @@ export function createMaterialCache() {
       return woods.get(color);
     },
     getStone() {
-      if (!cache._stone) cache._stone = mat(0xffffff, { map: plasterTexture('#8d8578'), roughness: 0.95 });
+      if (!cache._stone) cache._stone = mat(0xffffff, { map: stoneTexture('#8d8578'), roughness: 0.95 });
       return cache._stone;
     },
     getLeaf() {

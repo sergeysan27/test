@@ -85,6 +85,57 @@ export function pathTexture() {
   });
 }
 
+export function stoneTexture(base = '#8d8578') {
+  return cached(`stone(${base})`, () => {
+  const size = 256;
+  const c = canvas(size);
+  const g = c.getContext('2d');
+  g.fillStyle = '#5a5348';
+  g.fillRect(0, 0, size, size);
+
+  // Irregular courses of stone with mortar between them. The pattern is
+  // drawn so that it tiles seamlessly: every row is offset by half a stone
+  // and wraps around.
+  const rows = 8;
+  const rowH = size / rows;
+  let seed = 7;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  for (let r = 0; r < rows; r++) {
+    const y = r * rowH;
+    const cols = 5;
+    const offset = (r % 2) * (size / cols / 2);
+    for (let k = -1; k <= cols; k++) {
+      const w = size / cols;
+      const x = k * w + offset;
+      const shade = 0.82 + rand() * 0.34;
+      const cr = Math.round(141 * shade);
+      const cg = Math.round(133 * shade);
+      const cb = Math.round(120 * shade);
+      g.fillStyle = `rgb(${cr},${cg},${cb})`;
+      // a slightly rounded block
+      const pad = 1.2;
+      g.fillRect(x + pad, y + pad, w - pad * 2, rowH - pad * 2);
+      // a lighter top edge so the blocks read as separate stones
+      g.fillStyle = `rgba(255,250,240,0.14)`;
+      g.fillRect(x + pad, y + pad, w - pad * 2, 1.5);
+    }
+  }
+
+  // grain and chips
+  for (let i = 0; i < 1400; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const dark = Math.random() > 0.5;
+    g.fillStyle = dark ? 'rgba(40,36,30,0.16)' : 'rgba(255,250,238,0.12)';
+    g.fillRect(x, y, 1 + Math.random() * 3, 1 + Math.random() * 2);
+  }
+  return toTexture(c, 1);
+  });
+}
+
 export function plasterTexture(base = '#d9c9a8') {
   return cached(`plaster(${base})`, () => {
   const size = 256;
